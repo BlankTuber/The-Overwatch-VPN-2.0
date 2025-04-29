@@ -1,33 +1,65 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "productName": "the-ow-vpn-20",
-  "version": "0.1.0",
-  "identifier": "com.the-ow-vpn-20.app",
-  "build": {
-    "frontendDist": "../src"
-  },
-  "app": {
-    "withGlobalTauri": true,
-    "windows": [
-      {
-        "title": "the-ow-vpn-20",
-        "width": 800,
-        "height": 600
-      }
-    ],
-    "security": {
-      "csp": null
+    "$schema": "https://schema.tauri.app/config/2",
+    "productName": "The Overwatch VPN 2.0",
+    "version": "0.1.0",
+    "identifier": "com.quidque.ow-vpn",
+    "build": {
+        "frontendDist": "../src",
+        "devUrl": "http://localhost:1420",
+        "beforeDevCommand": "",
+        "beforeBuildCommand": ""
+    },
+    "app": {
+        "withGlobalTauri": true,
+        "windows": [
+            {
+                "title": "The Overwatch VPN 2.0",
+                "width": 800,
+                "height": 600,
+                "minWidth": 600,
+                "minHeight": 500,
+                "resizable": true,
+                "center": true,
+                "decorations": true
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "icon": [
+            "icons/32x32.png",
+            "icons/128x128.png",
+            "icons/128x128@2x.png",
+            "icons/icon.icns",
+            "icons/icon.ico"
+        ],
+        "resources": ["ips/*"],
+        "externalBin": ["binaries/ip-puller", "binaries/ow-firewall-sidecar"],
+        "windows": {
+            "wix": {
+                "language": "en-US"
+            },
+            "nsis": {
+                "installMode": "perMachine",
+                "headerImage": "icons/header.bmp",
+                "sidebarImage": "icons/sidebar.bmp",
+                "installerIcon": "icons/icon.ico"
+            }
+        }
+    },
+    "plugins": {
+        "shell": {
+            "open": true,
+            "scope": [
+                {
+                    "name": "ow-firewall-sidecar",
+                    "sidecar": true
+                }
+            ]
+        }
     }
-  },
-  "bundle": {
-    "active": true,
-    "targets": "all",
-    "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
-      "icons/128x128@2x.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ]
-  }
 }

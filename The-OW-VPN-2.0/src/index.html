@@ -1,39 +1,110 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Tauri App</title>
-    <script type="module" src="/main.js" defer></script>
-  </head>
+    <head>
+        <meta charset="UTF-8" />
+        <link rel="stylesheet" href="styles.css" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>The Overwatch VPN 2.0</title>
+        <script type="module" src="/main.js" defer></script>
+    </head>
 
-  <body>
-    <main class="container">
-      <h1>Welcome to Tauri</h1>
+    <body>
+        <main class="container">
+            <header>
+                <h1>The Overwatch VPN 2.0</h1>
+                <div class="status-bar">
+                    <span>Status: </span>
+                    <span id="status">Initializing...</span>
+                    <div id="spinner" class="spinner"></div>
+                </div>
+            </header>
 
-      <div class="row">
-        <a href="https://tauri.app" target="_blank">
-          <img src="/assets/tauri.svg" class="logo tauri" alt="Tauri logo" />
-        </a>
-        <a
-          href="https://developer.mozilla.org/en-US/docs/Web/JavaScript"
-          target="_blank"
-        >
-          <img
-            src="/assets/javascript.svg"
-            class="logo vanilla"
-            alt="JavaScript logo"
-          />
-        </a>
-      </div>
-      <p>Click on the Tauri logo to learn more about the framework</p>
+            <div class="control-panel">
+                <div class="panel-header">
+                    <h2>Region Control</h2>
+                </div>
 
-      <form class="row" id="greet-form">
-        <input id="greet-input" placeholder="Enter a name..." />
-        <button type="submit">Greet</button>
-      </form>
-      <p id="greet-msg"></p>
-    </main>
-  </body>
+                <div class="row region-selector">
+                    <label for="region-select">Select Region:</label>
+                    <select id="region-select">
+                        <option value="EU">Europe (EU)</option>
+                        <option value="NA">North America (NA)</option>
+                        <option value="SA">South America (SA)</option>
+                        <option value="AS">Asia (AS)</option>
+                        <option value="OCE">Oceania (OCE)</option>
+                        <option value="AFR">Africa (AFR)</option>
+                        <option value="ME">Middle East (ME)</option>
+                    </select>
+                </div>
+
+                <div class="row button-row">
+                    <button id="block-btn" class="action-button block">
+                        Block Region
+                    </button>
+                    <button id="unblock-btn" class="action-button unblock">
+                        Unblock Region
+                    </button>
+                </div>
+
+                <div class="row button-row">
+                    <button
+                        id="unblock-all-btn"
+                        class="action-button unblock-all"
+                    >
+                        Unblock All
+                    </button>
+                    <button id="refresh-btn" class="action-button refresh">
+                        Refresh Status
+                    </button>
+                </div>
+            </div>
+
+            <div class="output-container">
+                <div class="panel-header">
+                    <h2>Output</h2>
+                </div>
+                <pre id="output">Waiting for actions...</pre>
+            </div>
+
+            <div class="info-panel">
+                <div class="panel-header">
+                    <h2>Information</h2>
+                </div>
+                <div class="info-content">
+                    <p>
+                        This application helps you control which Overwatch
+                        servers you connect to by blocking specific regions.
+                    </p>
+                    <p><strong>How to use:</strong></p>
+                    <ol>
+                        <li>Select a region you want to avoid playing in</li>
+                        <li>
+                            Click "Block Region" to prevent connections to that
+                            region's servers
+                        </li>
+                        <li>Launch Overwatch and play with better ping!</li>
+                    </ol>
+                    <p><strong>Important notes:</strong></p>
+                    <ul>
+                        <li>
+                            Blocking won't work if Overwatch is currently
+                            running
+                        </li>
+                        <li>
+                            You may need to restart Overwatch after changing
+                            settings
+                        </li>
+                        <li>
+                            All blocks will be automatically removed when you
+                            close this app
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <footer>
+                <p>The Overwatch VPN 2.0 - Licensed under GNU GPL v3</p>
+            </footer>
+        </main>
+    </body>
 </html>
