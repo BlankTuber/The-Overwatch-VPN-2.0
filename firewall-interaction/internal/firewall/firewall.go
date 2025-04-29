@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"quidque.no/ow-firewall-sidecar/internal/config"
 )
@@ -203,6 +204,11 @@ func (f *Firewall) removeRules(region string) error {
 
 func (f *Firewall) listRules() ([]string, error) {
 	cmd := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all")
+	// Hide the console window
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.HideWindow = true
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list firewall rules: %w", err)
@@ -229,17 +235,27 @@ func (f *Firewall) listRules() ([]string, error) {
 func (f *Firewall) execFirewallCmd(args ...string) error {
 	allArgs := append([]string{"advfirewall", "firewall"}, args...)
 	cmd := exec.Command("netsh", allArgs...)
-	output, err := cmd.CombinedOutput()
 
+	// Hide the console window
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.HideWindow = true
+
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("firewall command failed: %s, error: %w", string(output), err)
 	}
-
 	return nil
 }
 
 func IsAdminPrivilegesAvailable() bool {
 	cmd := exec.Command("net", "session")
+	// Hide the console window
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.HideWindow = true
 	err := cmd.Run()
 	return err == nil
 }
