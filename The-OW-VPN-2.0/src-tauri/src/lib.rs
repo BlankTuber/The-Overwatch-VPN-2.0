@@ -36,64 +36,77 @@ async fn run_ip_puller(app_handle: AppHandle) -> Result<String, String> {
 // Get firewall sidecar status
 #[tauri::command]
 async fn get_firewall_status(app_handle: AppHandle) -> Result<String, String> {
-    let state = app_handle.state::<AppState>();
+    let sidecar_mutex = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
+    let mut sidecar_guard = sidecar_mutex.lock().map_err(|_| "Failed to lock firewall sidecar mutex".to_string())?;
     
-    // Run status check without starting a new sidecar process
-    let output = Command::new(&state.firewall_sidecar_path)
-        .args(["-action", "status"])
-        .output()
-        .map_err(|e| format!("Failed to check firewall status: {}", e))?;
-    
-    let status = String::from_utf8_lossy(&output.stdout);
-    Ok(status.to_string())
+    if let Some(child) = &mut *sidecar_guard {
+        // Use the existing elevated sidecar process to get status
+        let output = child
+            .write("status\n")
+            .map_err(|e| format!("Failed to send command to sidecar: {}", e))?;
+            
+        // Return the output from the sidecar
+        Ok(output)
+    } else {
+        Err("Firewall sidecar process not available".to_string())
+    }
 }
 
 // Block a region using the firewall sidecar
 #[tauri::command]
 async fn block_region(app_handle: AppHandle, region: String) -> Result<String, String> {
-    let sidecar = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
-    let state = app_handle.state::<AppState>();
+    let sidecar_mutex = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
+    let mut sidecar_guard = sidecar_mutex.lock().map_err(|_| "Failed to lock firewall sidecar mutex".to_string())?;
     
-    // Run the block command
-    let output = Command::new(&state.firewall_sidecar_path)
-        .args(["-action", "block", "-region", &region])
-        .output()
-        .map_err(|e| format!("Failed to block region: {}", e))?;
-    
-    let result = String::from_utf8_lossy(&output.stdout);
-    Ok(result.to_string())
+    if let Some(child) = &mut *sidecar_guard {
+        // Use the existing elevated sidecar process to block the region
+        let output = child
+            .write(format!("block|{}\n", region))
+            .map_err(|e| format!("Failed to send command to sidecar: {}", e))?;
+            
+        // Return the output from the sidecar
+        Ok(output)
+    } else {
+        Err("Firewall sidecar process not available".to_string())
+    }
 }
 
 // Unblock a region using the firewall sidecar
 #[tauri::command]
 async fn unblock_region(app_handle: AppHandle, region: String) -> Result<String, String> {
-    let sidecar = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
-    let state = app_handle.state::<AppState>();
+    let sidecar_mutex = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
+    let mut sidecar_guard = sidecar_mutex.lock().map_err(|_| "Failed to lock firewall sidecar mutex".to_string())?;
     
-    // Run the unblock command
-    let output = Command::new(&state.firewall_sidecar_path)
-        .args(["-action", "unblock", "-region", &region])
-        .output()
-        .map_err(|e| format!("Failed to unblock region: {}", e))?;
-    
-    let result = String::from_utf8_lossy(&output.stdout);
-    Ok(result.to_string())
+    if let Some(child) = &mut *sidecar_guard {
+        // Use the existing elevated sidecar process to unblock the region
+        let output = child
+            .write(format!("unblock|{}\n", region))
+            .map_err(|e| format!("Failed to send command to sidecar: {}", e))?;
+            
+        // Return the output from the sidecar
+        Ok(output)
+    } else {
+        Err("Firewall sidecar process not available".to_string())
+    }
 }
 
 // Unblock all using the firewall sidecar
 #[tauri::command]
 async fn unblock_all(app_handle: AppHandle) -> Result<String, String> {
-    let sidecar = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
-    let state = app_handle.state::<AppState>();
+    let sidecar_mutex = get_firewall_sidecar().ok_or_else(|| "Firewall sidecar not initialized".to_string())?;
+    let mut sidecar_guard = sidecar_mutex.lock().map_err(|_| "Failed to lock firewall sidecar mutex".to_string())?;
     
-    // Run the unblock-all command
-    let output = Command::new(&state.firewall_sidecar_path)
-        .args(["-action", "unblock-all"])
-        .output()
-        .map_err(|e| format!("Failed to unblock all: {}", e))?;
-    
-    let result = String::from_utf8_lossy(&output.stdout);
-    Ok(result.to_string())
+    if let Some(child) = &mut *sidecar_guard {
+        // Use the existing elevated sidecar process to unblock all
+        let output = child
+            .write("unblock-all\n")
+            .map_err(|e| format!("Failed to send command to sidecar: {}", e))?;
+            
+        // Return the output from the sidecar
+        Ok(output)
+    } else {
+        Err("Firewall sidecar process not available".to_string())
+    }
 }
 
 // Initialize the firewall sidecar process
@@ -112,9 +125,14 @@ fn init_firewall_sidecar(app_handle: &AppHandle) -> Result<()> {
     // Start the firewall sidecar in daemon mode (will show UAC prompt)
     let child = tauri_plugin_shell::process::Command::new_sidecar("ow-firewall-sidecar")
         .expect("failed to create sidecar command")
-        .args(["-action", "status"])
+        .args(["daemon"])
         .spawn()
         .map_err(|e| anyhow!("Failed to start firewall sidecar: {}", e))?;
+
+    // Register for events from the child process
+    app_handle.listen_global("ow-firewall-sidecar://output", |event| {
+        println!("Sidecar output: {}", event.payload().unwrap_or_default());
+    });
 
     // Store the child process
     let mutex = Mutex::new(Some(child));

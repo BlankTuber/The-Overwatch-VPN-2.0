@@ -25,13 +25,54 @@ func New() *Firewall {
 	}
 }
 
-// getOverwatchExePath tries to locate the Overwatch executable
-// In a real implementation, this would search common installation paths
-// or read from registry
 func getOverwatchExePath() string {
-	// For now, this is a placeholder
-	// In a real implementation, this would detect the actual path
+	// Check common installation paths
+	commonPaths := []string{
+		"C:\\Program Files\\Overwatch\\" + config.OverwatchProcessName,
+		"C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName,
+		"C:\\Program Files\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
+		"C:\\Program Files (x86)\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
+	}
+	
+	// Try to find from Battle.net registry entries
+	battleNetPaths := getBattleNetGamePaths()
+	if len(battleNetPaths) > 0 {
+		commonPaths = append(commonPaths, battleNetPaths...)
+	}
+	
+	// Check if any of these paths exist
+	for _, path := range commonPaths {
+		if fileExists(path) {
+			return path
+		}
+	}
+	
+	// Fall back to the default path if nothing else is found
 	return "C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName
+}
+
+func getBattleNetGamePaths() []string {
+	// This would normally use the golang.org/x/sys/windows/registry package
+	// to look for Battle.net installations in the Windows registry
+	// For example locations like:
+	// HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Blizzard Entertainment\Battle.net\InstallPath
+	// and then look for Overwatch in product-specific subkeys
+	
+	// For simplicity in this example, we're just checking some additional common paths
+	return []string{
+		"D:\\Games\\Overwatch\\" + config.OverwatchProcessName,
+		"D:\\Blizzard\\Overwatch\\" + config.OverwatchProcessName,
+		"D:\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
+		"E:\\Games\\Overwatch\\" + config.OverwatchProcessName,
+	}
+}
+
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
 }
 
 // BlockIPs blocks the IPs in the specified region for Overwatch

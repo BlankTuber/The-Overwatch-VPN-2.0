@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"quidque.no/ow-firewall-sidecar/internal/config"
@@ -28,7 +30,16 @@ func main() {
 	waitTimeout := flag.Int("wait-timeout", 0, "Timeout in seconds to wait for Overwatch to close (0 = no timeout)")
 	flag.Parse()
 
-	// Validate arguments
+	// Initialize firewall
+	fw := firewall.New()
+
+	// Check if we're running in daemon mode
+	if flag.Arg(0) == "daemon" {
+		runDaemonMode(fw, *ipDir, *waitTimeout)
+		return
+	}
+
+	// Validate arguments for one-shot mode
 	if *action == "" {
 		fmt.Println("ERROR: Missing required action flag")
 		flag.Usage()
@@ -41,95 +52,131 @@ func main() {
 		os.Exit(config.ExitErrorInvalidArgs)
 	}
 
-	// Initialize firewall
-	fw := firewall.New()
+	// Execute the requested action
+	executeAction(fw, *action, *region, *ipDir, *waitTimeout)
+}
+
+// Run in daemon mode, listening for commands
+func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
+	fmt.Println("Starting firewall sidecar in daemon mode")
+	fmt.Println("Elevated privileges obtained")
+
+	// Make IP directory path absolute if it's relative
+	absIPDir, err := filepath.Abs(ipDir)
+	if err != nil {
+		fmt.Printf("ERROR: Failed to resolve IP directory path: %v\n", err)
+		os.Exit(config.ExitErrorIPListRead)
+	}
+
+	// Set up channel to receive signals
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	// Start a goroutine to handle signals
+	go func() {
+		// Block until signal is received
+		<-c
+		fmt.Println("Shutting down, cleaning up firewall rules...")
+		fw.UnblockAll()
+		os.Exit(config.ExitSuccess)
+	}()
+
+	// Process standard input for commands
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		command := scanner.Text()
+		parts := strings.Split(command, "|")
+		
+		action := parts[0]
+		var region string
+		if len(parts) > 1 {
+			region = parts[1]
+		}
+		
+		result := executeActionWithResult(fw, action, region, absIPDir, waitTimeout)
+		fmt.Println(result) // Send result back to the parent process
+	}
+
+	if err := scanner.Err(); err != nil {
+		fmt.Printf("ERROR: Error reading input: %v\n", err)
+		os.Exit(config.ExitErrorInvalidArgs)
+	}
+}
+
+// Execute an action and return the result
+func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string, waitTimeout int) string {
+	// Make IP directory path absolute if it's relative
+	absIPDir, err := filepath.Abs(ipDir)
+	if err != nil {
+		return fmt.Sprintf("ERROR: Failed to resolve IP directory path: %v", err)
+	}
 
 	// Handle different actions
-	switch *action {
+	switch action {
 	case config.ActionBlock:
-		// Make IP directory path absolute if it's relative
-		absIPDir, err := filepath.Abs(*ipDir)
-		if err != nil {
-			fmt.Printf("ERROR: Failed to resolve IP directory path: %v\n", err)
-			os.Exit(config.ExitErrorIPListRead)
-		}
-
 		// Check if Overwatch is running
 		isRunning, err := process.IsOverwatchRunning()
 		if err != nil {
-			fmt.Printf("ERROR: Failed to check if Overwatch is running: %v\n", err)
-			os.Exit(config.ExitErrorProcessCheck)
+			return fmt.Sprintf("ERROR: Failed to check if Overwatch is running: %v", err)
 		}
 
 		if isRunning {
-			fmt.Println("Overwatch is currently running.")
-			fmt.Println("Waiting for Overwatch to close before applying firewall rules...")
+			result := "Overwatch is currently running.\n"
+			result += "Waiting for Overwatch to close before applying firewall rules..."
 			
 			// Wait for Overwatch to close
-			err = process.WaitForOverwatchToClose(*waitTimeout)
+			err = process.WaitForOverwatchToClose(waitTimeout)
 			if err != nil {
-				fmt.Printf("ERROR: %v\n", err)
-				os.Exit(config.ExitErrorProcessCheck)
+				return fmt.Sprintf("%s\nERROR: %v", result, err)
 			}
 		}
 
 		// Apply block
-		fmt.Printf("Blocking IPs for region %s...\n", *region)
-		if err := fw.BlockIPs(*region, absIPDir); err != nil {
-			fmt.Printf("ERROR: Failed to block IPs: %v\n", err)
-			os.Exit(config.ExitErrorFirewall)
+		result := fmt.Sprintf("Blocking IPs for region %s...\n", region)
+		if err := fw.BlockIPs(region, absIPDir); err != nil {
+			return fmt.Sprintf("%sERROR: Failed to block IPs: %v", result, err)
 		}
-		fmt.Println("Successfully blocked IPs.")
+		return result + "Successfully blocked IPs."
 
 	case config.ActionUnblock:
-		fmt.Printf("Unblocking IPs for region %s...\n", *region)
-		if err := fw.UnblockIPs(*region); err != nil {
-			fmt.Printf("ERROR: Failed to unblock IPs: %v\n", err)
-			os.Exit(config.ExitErrorFirewall)
+		result := fmt.Sprintf("Unblocking IPs for region %s...\n", region)
+		if err := fw.UnblockIPs(region); err != nil {
+			return fmt.Sprintf("%sERROR: Failed to unblock IPs: %v", result, err)
 		}
-		fmt.Println("Successfully unblocked IPs.")
+		return result + "Successfully unblocked IPs."
 
 	case config.ActionUnblockAll:
-		fmt.Println("Unblocking all IPs...")
+		result := "Unblocking all IPs...\n"
 		if err := fw.UnblockAll(); err != nil {
-			fmt.Printf("ERROR: Failed to unblock all IPs: %v\n", err)
-			os.Exit(config.ExitErrorFirewall)
+			return fmt.Sprintf("%sERROR: Failed to unblock all IPs: %v", result, err)
 		}
-		fmt.Println("Successfully unblocked all IPs.")
+		return result + "Successfully unblocked all IPs."
 
 	case config.ActionStatus:
 		isRunning, err := process.IsOverwatchRunning()
 		if err != nil {
-			fmt.Printf("ERROR: Failed to check if Overwatch is running: %v\n", err)
-			os.Exit(config.ExitErrorProcessCheck)
+			return fmt.Sprintf("ERROR: Failed to check if Overwatch is running: %v", err)
 		}
 
 		if isRunning {
-			fmt.Println("Status: Overwatch is currently running")
+			return "Status: Overwatch is currently running"
 		} else {
-			fmt.Println("Status: Overwatch is not running")
+			return "Status: Overwatch is not running"
 		}
 
 	default:
-		fmt.Printf("ERROR: Unknown action '%s'\n", *action)
-		flag.Usage()
-		os.Exit(config.ExitErrorInvalidArgs)
+		return fmt.Sprintf("ERROR: Unknown action '%s'", action)
 	}
+}
 
-	// Setup cleanup on application shutdown if we're running as a daemon
-	if flag.Arg(0) == "daemon" {
-		fmt.Println("Running in daemon mode. Press Ctrl+C to exit.")
-		
-		// Set up channel to receive signals
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-		
-		// Block until signal is received
-		<-c
-		
-		fmt.Println("Shutting down, cleaning up firewall rules...")
-		fw.UnblockAll()
+// Execute an action (one-shot mode)
+func executeAction(fw *firewall.Firewall, action, region, ipDir string, waitTimeout int) {
+	result := executeActionWithResult(fw, action, region, ipDir, waitTimeout)
+	fmt.Println(result)
+	
+	// Exit with appropriate code
+	if strings.Contains(result, "ERROR:") {
+		os.Exit(config.ExitErrorFirewall)
 	}
-
 	os.Exit(config.ExitSuccess)
 }

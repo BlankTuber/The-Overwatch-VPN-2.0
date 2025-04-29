@@ -17,22 +17,45 @@ cd ..
 
 :: Step 2: Build the Firewall Sidecar
 echo Building Firewall Sidecar...
-cd ow-firewall-sidecar
+cd firewall-interaction
 go build -o ..\src-tauri\binaries\ow-firewall-sidecar.exe cmd\sidecar\main.go
-
-:: Add the administrator manifest
-echo Adding UAC manifest to the sidecar...
-type sidecar.manifest > ..\src-tauri\binaries\sidecar.manifest
-echo 1 24 "sidecar.manifest" > ..\src-tauri\binaries\sidecar.rc
-windres ..\src-tauri\binaries\sidecar.rc -O coff -o ..\src-tauri\binaries\sidecar.res
-ld -r -b pei-i386 -o ..\src-tauri\binaries\ow-firewall-sidecar-admin.exe ..\src-tauri\binaries\ow-firewall-sidecar.exe ..\src-tauri\binaries\sidecar.res
-move /y ..\src-tauri\binaries\ow-firewall-sidecar-admin.exe ..\src-tauri\binaries\ow-firewall-sidecar.exe
-del ..\src-tauri\binaries\sidecar.manifest ..\src-tauri\binaries\sidecar.rc ..\src-tauri\binaries\sidecar.res
-
 if %ERRORLEVEL% neq 0 (
     echo Error building Firewall Sidecar
     exit /b %ERRORLEVEL%
 )
+
+:: Add the administrator manifest using Windows SDK tools
+echo Adding UAC manifest to the sidecar...
+copy sidecar.manifest ..\src-tauri\binaries\ow-firewall-sidecar.manifest
+:: Try to use mt.exe if available (from Windows SDK)
+where mt.exe >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    mt.exe -manifest ..\src-tauri\binaries\ow-firewall-sidecar.manifest -outputresource:..\src-tauri\binaries\ow-firewall-sidecar.exe;#1
+) else (
+    :: Fallback to rc.exe + link.exe if available (also from Windows SDK)
+    where rc.exe >nul 2>nul && where link.exe >nul 2>nul
+    if %ERRORLEVEL% equ 0 (
+        echo #define MANIFEST_RESOURCE_ID 1 > ..\src-tauri\binaries\manifest.rc
+        echo MANIFEST_RESOURCE_ID RT_MANIFEST "..\src-tauri\binaries\ow-firewall-sidecar.manifest" >> ..\src-tauri\binaries\manifest.rc
+        rc.exe ..\src-tauri\binaries\manifest.rc
+        link.exe /SUBSYSTEM:WINDOWS ..\src-tauri\binaries\ow-firewall-sidecar.exe ..\src-tauri\binaries\manifest.res /OUT:..\src-tauri\binaries\ow-firewall-sidecar-admin.exe
+        move /y ..\src-tauri\binaries\ow-firewall-sidecar-admin.exe ..\src-tauri\binaries\ow-firewall-sidecar.exe
+        del ..\src-tauri\binaries\manifest.rc ..\src-tauri\binaries\manifest.res
+    ) else (
+        :: Last resort fallback to windres + ld if they're available (MinGW/MSYS2)
+        where windres.exe >nul 2>nul && where ld.exe >nul 2>nul
+        if %ERRORLEVEL% equ 0 (
+            echo 1 24 "..\src-tauri\binaries\ow-firewall-sidecar.manifest" > ..\src-tauri\binaries\sidecar.rc
+            windres.exe ..\src-tauri\binaries\sidecar.rc -O coff -o ..\src-tauri\binaries\sidecar.res
+            ld.exe -r -b pei-i386 -o ..\src-tauri\binaries\ow-firewall-sidecar-admin.exe ..\src-tauri\binaries\ow-firewall-sidecar.exe ..\src-tauri\binaries\sidecar.res
+            move /y ..\src-tauri\binaries\ow-firewall-sidecar-admin.exe ..\src-tauri\binaries\ow-firewall-sidecar.exe
+            del ..\src-tauri\binaries\sidecar.rc ..\src-tauri\binaries\sidecar.res
+        ) else (
+            echo WARNING: Could not find tools to embed manifest. UAC elevation may not work properly.
+        )
+    )
+)
+del ..\src-tauri\binaries\ow-firewall-sidecar.manifest >nul 2>nul
 cd ..
 
 :: Step 3: Run IP Puller once to generate initial IP lists
