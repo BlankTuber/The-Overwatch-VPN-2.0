@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"image/color"
 	"io"
 	"os"
 	"os/exec"
@@ -22,77 +23,58 @@ import (
 
 var regions = []string{"EU", "NA", "AS", "AFR", "ME", "OCE", "SA"}
 
+// Colors for UI elements
+var (
+	colorBlocked   = color.NRGBA{R: 217, G: 83, B: 79, A: 255}  // Red
+	colorUnblocked = color.NRGBA{R: 0, G: 177, B: 87, A: 255}   // Green
+	colorTitle     = color.NRGBA{R: 66, G: 139, B: 202, A: 255} // Blue
+)
+
 type OwVpnGui struct {
-	window        fyne.Window
-	logText       *widget.Label
-	statusLabel   *widget.Label
-	statusIcon    *canvas.Image
-	progressBar   *widget.ProgressBarInfinite
-	regionButtons map[string]*widget.Button
-	firewallCmd   *exec.Cmd
-	cmdStdin      io.WriteCloser
-	blocked       map[string]bool
-	waiting       bool
-	waitingMutex  sync.Mutex
+	window           fyne.Window
+	logText          *widget.Label
+	statusLabel      *widget.Label
+	statusIcon       *canvas.Image
+	progressBar      *widget.ProgressBarInfinite
+	regionButtons    map[string]*widget.Button
+	firewallCmd      *exec.Cmd
+	cmdStdin         io.WriteCloser
+	blocked          map[string]bool
+	waiting          bool
+	waitingMutex     sync.Mutex
+	availableRegions []string
+}
+
+func checkAdminPermissions() bool {
+	cmd := exec.Command("net", "session")
+	return cmd.Run() == nil
 }
 
 func main() {
 	a := app.New()
-	w := a.NewWindow("Overwatch VPN")
-	w.Resize(fyne.NewSize(600, 400))
+	w := a.NewWindow("Overwatch VPN 2.0")
+	w.Resize(fyne.NewSize(800, 600))
+
+	// Check for admin permissions first
+	if !checkAdminPermissions() {
+		showAdminPermissionsDialog(w)
+		w.ShowAndRun()
+		return
+	}
 
 	gui := &OwVpnGui{
-		window:        w,
-		logText:       widget.NewLabel("Starting application..."),
-		statusLabel:   widget.NewLabel("Initializing..."),
-		statusIcon:    canvas.NewImageFromResource(theme.InfoIcon()),
-		progressBar:   widget.NewProgressBarInfinite(),
-		regionButtons: make(map[string]*widget.Button),
-		blocked:       make(map[string]bool),
-		waiting:       false,
+		window:           w,
+		logText:          widget.NewLabel("Starting application..."),
+		statusLabel:      widget.NewLabel("Initializing..."),
+		statusIcon:       canvas.NewImageFromResource(theme.InfoIcon()),
+		progressBar:      widget.NewProgressBarInfinite(),
+		regionButtons:    make(map[string]*widget.Button),
+		blocked:          make(map[string]bool),
+		waiting:          false,
+		availableRegions: []string{},
 	}
 
-	gui.statusIcon.SetMinSize(fyne.NewSize(20, 20))
-	gui.progressBar.Hide()
-
-	gui.logText.Wrapping = fyne.TextWrapWord
-	scrollLog := container.NewScroll(gui.logText)
-	scrollLog.SetMinSize(fyne.NewSize(580, 150))
-
-	statusBox := container.NewHBox(
-		gui.statusIcon,
-		widget.NewLabel("Status:"),
-		gui.statusLabel,
-		gui.progressBar,
-	)
-
-	regionButtons := container.NewGridWithColumns(4)
-	for _, region := range regions {
-		btn := widget.NewButton(fmt.Sprintf("Block %s", region), nil)
-		regionName := region
-		btn.OnTapped = func() {
-			gui.toggleRegion(regionName)
-		}
-		gui.regionButtons[region] = btn
-		regionButtons.Add(btn)
-	}
-
-	unblockAllBtn := widget.NewButton("Unblock All Regions", func() {
-		gui.unblockAll()
-	})
-
-	content := container.NewVBox(
-		statusBox,
-		widget.NewSeparator(),
-		scrollLog,
-		widget.NewSeparator(),
-		widget.NewLabel("Region Control:"),
-		regionButtons,
-		widget.NewSeparator(),
-		unblockAllBtn,
-	)
-
-	w.SetContent(content)
+	gui.updateRegionButtons()
 
 	w.SetOnClosed(func() {
 		gui.cleanup()
@@ -101,6 +83,129 @@ func main() {
 	go gui.initialize()
 
 	w.ShowAndRun()
+}
+
+func showAdminPermissionsDialog(w fyne.Window) {
+	content := container.NewVBox(
+		widget.NewLabel("This application requires administrator privileges."),
+		widget.NewLabel("Please right-click and select 'Run as administrator'."),
+	)
+
+	dialog := dialog.NewCustom("Administrator Privileges Required", "Exit", content, w)
+	dialog.SetOnClosed(func() {
+		os.Exit(1)
+	})
+
+	dialog.Show()
+}
+
+func (g *OwVpnGui) updateAvailableRegions() {
+	g.log("Checking available region IP lists...")
+	ipDir := "ips"
+
+	// Create the directory if it doesn't exist
+	if _, err := os.Stat(ipDir); os.IsNotExist(err) {
+		g.log("IP directory not found, will be created after IP Puller runs")
+		return
+	}
+
+	// Clear the available regions
+	g.availableRegions = []string{}
+
+	// Check each region
+	for _, region := range regions {
+		filename := filepath.Join(ipDir, fmt.Sprintf("%s.txt", region))
+		if info, err := os.Stat(filename); err == nil && !info.IsDir() {
+			// File exists and is not a directory
+			g.availableRegions = append(g.availableRegions, region)
+			g.log(fmt.Sprintf("Found IP list for region: %s", region))
+		}
+	}
+
+	// Update the UI to show only available regions
+	g.updateRegionButtons()
+}
+
+func (g *OwVpnGui) updateRegionButtons() {
+	// Create a new grid with 3 columns
+	regionButtons := container.NewGridWithColumns(3)
+
+	// Clear current buttons
+	g.regionButtons = make(map[string]*widget.Button)
+
+	if len(g.availableRegions) == 0 {
+		noRegionsLabel := widget.NewLabel("No region IP lists available. Please run IP Puller first.")
+		regionButtons.Add(noRegionsLabel)
+	} else {
+		for _, region := range g.availableRegions {
+			// Create button with initial green/unblocked state
+			btn := widget.NewButton(region, nil)
+			btn.Importance = widget.SuccessImportance // Start as green
+			btn.SetIcon(theme.ContentRemoveIcon())    // Using remove icon as "unblocked" (removing restrictions)
+
+			// Store region for callback
+			regionName := region
+
+			btn.OnTapped = func() {
+				g.toggleRegion(regionName)
+			}
+
+			// Create a container with the button
+			buttonContainer := container.NewPadded(btn)
+
+			g.regionButtons[region] = btn
+			regionButtons.Add(buttonContainer)
+		}
+	}
+
+	// Create the updated content
+	titleLabel := canvas.NewText("OVERWATCH VPN", color.NRGBA{R: 66, G: 139, B: 202, A: 255})
+	titleLabel.TextSize = 28
+	titleLabel.TextStyle = fyne.TextStyle{Bold: true}
+	titleLabel.Alignment = fyne.TextAlignCenter
+
+	statusLabel := canvas.NewText("Status:", color.White)
+	statusLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	statusBox := container.NewHBox(
+		g.statusIcon,
+		container.NewPadded(statusLabel),
+		g.statusLabel,
+		g.progressBar,
+	)
+
+	regionLabel := canvas.NewText("SELECT REGIONS TO BLOCK", color.NRGBA{R: 66, G: 139, B: 202, A: 255})
+	regionLabel.TextSize = 18
+	regionLabel.TextStyle = fyne.TextStyle{Bold: true}
+	regionLabel.Alignment = fyne.TextAlignCenter
+
+	unblockAllBtn := widget.NewButton("UNBLOCK ALL REGIONS", func() {
+		g.unblockAll()
+	})
+	unblockAllBtn.Importance = widget.HighImportance
+	unblockAllBtnContainer := container.NewPadded(unblockAllBtn)
+
+	logLabel := canvas.NewText("CONNECTION LOG", color.NRGBA{R: 66, G: 139, B: 202, A: 255})
+	logLabel.TextSize = 16
+	logLabel.TextStyle = fyne.TextStyle{Bold: true}
+	logLabel.Alignment = fyne.TextAlignCenter
+
+	scrollLog := container.NewScroll(g.logText)
+	scrollLog.SetMinSize(fyne.NewSize(780, 150))
+
+	content := container.NewVBox(
+		container.NewPadded(titleLabel),
+		container.NewPadded(statusBox),
+		widget.NewSeparator(),
+		container.NewPadded(regionLabel),
+		container.NewPadded(regionButtons),
+		container.NewCenter(unblockAllBtnContainer),
+		widget.NewSeparator(),
+		container.NewPadded(logLabel),
+		container.NewPadded(scrollLog),
+	)
+
+	g.window.SetContent(container.NewPadded(content))
 }
 
 func (g *OwVpnGui) initialize() {
@@ -114,6 +219,9 @@ func (g *OwVpnGui) initialize() {
 		return
 	}
 	g.log("Successfully fetched IP addresses")
+
+	// Check available regions and update UI
+	g.updateAvailableRegions()
 
 	g.log("Starting firewall daemon...")
 	if err := g.startFirewallDaemon(); err != nil {
@@ -200,12 +308,10 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 }
 
 func (g *OwVpnGui) processFirewallOutput(text string) {
-	// Log errors and success messages
 	if strings.Contains(text, "ERROR:") || strings.Contains(text, "Successfully") {
 		g.log(text)
 	}
 
-	// Detect waiting state
 	if strings.Contains(text, "Overwatch is currently running") ||
 		strings.Contains(text, "Waiting for Overwatch to close") {
 		g.setWaiting(true)
@@ -213,13 +319,11 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 		g.setStatus("Waiting for Overwatch to close", theme.WarningIcon())
 	}
 
-	// Detect operations in progress
 	if strings.Contains(text, "Blocking IPs") || strings.Contains(text, "Unblocking IPs") {
 		g.setWaiting(true)
 		g.setStatus("Working...", theme.InfoIcon())
 	}
 
-	// Detect completion
 	if strings.Contains(text, "Successfully blocked") ||
 		strings.Contains(text, "Successfully unblocked") ||
 		strings.Contains(text, "Successfully removed") {
@@ -227,13 +331,11 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 		g.setStatus("Ready", theme.ConfirmIcon())
 	}
 
-	// Detect errors
 	if strings.Contains(text, "ERROR:") {
 		g.setWaiting(false)
 		g.setStatus("Error", theme.ErrorIcon())
 	}
 
-	// Status check response
 	if strings.Contains(text, "Status: Overwatch is currently running") {
 		g.setStatus("Overwatch is running", theme.InfoIcon())
 	} else if strings.Contains(text, "Status: Overwatch is not running") {
@@ -269,7 +371,6 @@ func (g *OwVpnGui) setWaiting(waiting bool) {
 func (g *OwVpnGui) toggleRegion(region string) {
 	isBlocked := g.blocked[region]
 
-	// Don't allow toggling while in waiting state
 	if g.waiting {
 		g.log("Please wait for current operation to complete")
 		return
@@ -282,8 +383,13 @@ func (g *OwVpnGui) toggleRegion(region string) {
 			return
 		}
 		g.blocked[region] = false
+
+		// Use unblocked style (green with remove icon for "remove restrictions")
+		g.regionButtons[region].Importance = widget.SuccessImportance
+		g.regionButtons[region].SetText(region)
+		g.regionButtons[region].SetIcon(theme.ContentRemoveIcon())
+
 		g.window.Canvas().Refresh(g.regionButtons[region])
-		g.regionButtons[region].SetText(fmt.Sprintf("Block %s", region))
 		g.setWaiting(true)
 	} else {
 		g.log(fmt.Sprintf("Blocking region %s...", region))
@@ -292,14 +398,18 @@ func (g *OwVpnGui) toggleRegion(region string) {
 			return
 		}
 		g.blocked[region] = true
+
+		// Use blocked style (red with add icon for "add restrictions")
+		g.regionButtons[region].Importance = widget.DangerImportance
+		g.regionButtons[region].SetText(region)
+		g.regionButtons[region].SetIcon(theme.ContentAddIcon())
+
 		g.window.Canvas().Refresh(g.regionButtons[region])
-		g.regionButtons[region].SetText(fmt.Sprintf("Unblock %s", region))
 		g.setWaiting(true)
 	}
 }
 
 func (g *OwVpnGui) unblockAll() {
-	// Don't allow unblocking all while in waiting state
 	if g.waiting {
 		g.log("Please wait for current operation to complete")
 		return
@@ -313,7 +423,9 @@ func (g *OwVpnGui) unblockAll() {
 
 	for region := range g.blocked {
 		g.blocked[region] = false
-		g.regionButtons[region].SetText(fmt.Sprintf("Block %s", region))
+		g.regionButtons[region].Importance = widget.SuccessImportance
+		g.regionButtons[region].SetText(region)
+		g.regionButtons[region].SetIcon(theme.ContentRemoveIcon()) // Using remove icon as "unblocked" (removing restrictions)
 	}
 	g.window.Canvas().Refresh(g.window.Content())
 	g.setWaiting(true)
@@ -343,44 +455,32 @@ func (g *OwVpnGui) setStatus(status string, icon fyne.Resource) {
 
 func (g *OwVpnGui) log(message string) {
 	fmt.Println(message)
-	currentText := g.logText.Text
-	g.logText.SetText(message + "\n" + currentText)
+
+	timestamp := time.Now().Format("15:04:05")
+	formattedMsg := fmt.Sprintf("[%s] %s\n%s", timestamp, message, g.logText.Text)
+	g.logText.SetText(formattedMsg)
 	g.window.Canvas().Refresh(g.logText)
 }
 
 func (g *OwVpnGui) cleanup() {
 	g.log("Cleaning up...")
 
-	// Send unblock-all command
+	// Hide the window during cleanup
+	g.window.Hide()
+
+	// Send cleanup command to the firewall daemon
 	if g.cmdStdin != nil {
+		g.log("Sending cleanup command to firewall daemon...")
 		_ = g.sendCommand("unblock-all")
-		// Give more time for the unblock operation to complete
-		time.Sleep(1 * time.Second)
-	}
 
-	// Close stdin pipe to signal EOF to the sidecar
-	if g.cmdStdin != nil {
+		// Close stdin pipe to signal EOF to the sidecar
 		_ = g.cmdStdin.Close()
+
+		// Let the firewall daemon clean up in the background
+		// The application will exit without waiting
 	}
 
-	// Wait for firewall process to exit
-	if g.firewallCmd != nil && g.firewallCmd.Process != nil {
-		// Give the process a chance to exit gracefully
-		waitCh := make(chan error, 1)
-		go func() {
-			waitCh <- g.firewallCmd.Wait()
-		}()
-
-		// Wait for process to exit or timeout
-		select {
-		case <-waitCh:
-			// Process exited
-		case <-time.After(2 * time.Second):
-			// Timeout, force kill
-			_ = g.firewallCmd.Process.Kill()
-			_ = g.firewallCmd.Wait()
-		}
-	}
-
-	g.log("Cleanup complete")
+	// Exit the application - the firewall daemon will clean up in the background
+	g.log("Cleanup initiated, exiting...")
+	os.Exit(0)
 }

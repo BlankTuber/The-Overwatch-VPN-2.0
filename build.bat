@@ -35,7 +35,8 @@ echo - Firewall Sidecar built successfully
 echo.
 echo Building Fyne GUI...
 cd fyne-gui
-go build -o ..\bin\ow-vpn.exe main.go
+:: Use the -ldflags "-H=windowsgui" flag to hide the console window when running the GUI
+go build -ldflags "-H=windowsgui" -o ..\bin\ow-vpn.exe main.go
 if %errorlevel% neq 0 (
     echo ERROR: Failed to build Fyne GUI
     exit /b %errorlevel%
