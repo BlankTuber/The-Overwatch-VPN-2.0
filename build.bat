@@ -66,18 +66,10 @@ if %ERRORLEVEL% equ 0 (
 del ..\%PROJECT_DIR%\src-tauri\binaries\ow-firewall-sidecar.manifest >nul 2>nul
 cd ..
 
-:: Step 3: Run IP Puller once to generate initial IP lists
-echo Generating initial IP lists...
-:: Run from the correct location with correct path
-.\%PROJECT_DIR%\src-tauri\binaries\ip-puller.exe
-if %ERRORLEVEL% neq 0 (
-    echo Warning: Failed to generate initial IP lists
-    echo The app will attempt to generate them at first run
-)
+:: Step 3: [SKIPPED] No longer generating initial IP lists during build
+echo Skipping initial IP list generation - will be pulled at runtime
 
-:: Step 4: Copy IP lists to the Tauri resources directory
-echo Copying IP lists to Tauri resources...
-xcopy /y /i ips\*.txt %PROJECT_DIR%\src-tauri\ips\
+:: Step 4: [SKIPPED] No longer copying IP lists to Tauri resources
 
 :: Step 5: Build the Tauri application
 echo Building Tauri application...
