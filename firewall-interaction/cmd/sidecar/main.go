@@ -16,30 +16,28 @@ import (
 )
 
 func main() {
-	// Check for admin privileges
 	if !firewall.IsAdminPrivilegesAvailable() {
 		fmt.Println("ERROR: This application requires administrator privileges.")
 		fmt.Println("Please right-click and select 'Run as administrator'.")
 		os.Exit(config.ExitErrorAdminRights)
 	}
 
-	// Parse command line flags
 	action := flag.String("action", "", "Action to perform: block, unblock, unblock-all, status")
 	region := flag.String("region", "", "Region to block/unblock (EU, NA, AS, etc.)")
 	ipDir := flag.String("ip-dir", config.DefaultIPListDir, "Directory containing IP list files")
 	waitTimeout := flag.Int("wait-timeout", 0, "Timeout in seconds to wait for Overwatch to close (0 = no timeout)")
 	flag.Parse()
 
-	// Initialize firewall
 	fw := firewall.New()
 
-	// Check if we're running in daemon mode
+	// Set up cleanup on exit for any mode
+	setupCleanupHandler(fw)
+
 	if flag.Arg(0) == "daemon" {
 		runDaemonMode(fw, *ipDir, *waitTimeout)
 		return
 	}
 
-	// Validate arguments for one-shot mode
 	if *action == "" {
 		fmt.Println("ERROR: Missing required action flag")
 		flag.Usage()
@@ -52,69 +50,73 @@ func main() {
 		os.Exit(config.ExitErrorInvalidArgs)
 	}
 
-	// Execute the requested action
 	executeAction(fw, *action, *region, *ipDir, *waitTimeout)
 }
 
-// Run in daemon mode, listening for commands
-func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
-	fmt.Println("Starting firewall sidecar in daemon mode")
-	fmt.Println("Elevated privileges obtained")
+// setupCleanupHandler ensures firewall rules are cleaned up on program exit
+func setupCleanupHandler(fw *firewall.Firewall) {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 
-	// Make IP directory path absolute if it's relative
+	go func() {
+		<-c
+		fmt.Println("Shutting down, cleaning up firewall rules...")
+		fw.UnblockAll()
+		os.Exit(config.ExitSuccess)
+	}()
+}
+
+func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
+	fmt.Println("Starting firewall sidecar")
+
 	absIPDir, err := filepath.Abs(ipDir)
 	if err != nil {
 		fmt.Printf("ERROR: Failed to resolve IP directory path: %v\n", err)
 		os.Exit(config.ExitErrorIPListRead)
 	}
 
-	// Set up channel to receive signals
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-
-	// Start a goroutine to handle signals
-	go func() {
-		// Block until signal is received
-		<-c
-		fmt.Println("Shutting down, cleaning up firewall rules...")
-		fw.UnblockAll()
-		os.Exit(config.ExitSuccess)
-	}()
-
-	// Process standard input for commands
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		command := scanner.Text()
+
+		// Check for EOF or empty input
+		if command == "" {
+			continue
+		}
+
 		parts := strings.Split(command, "|")
-		
+
 		action := parts[0]
 		var region string
 		if len(parts) > 1 {
 			region = parts[1]
 		}
-		
+
 		result := executeActionWithResult(fw, action, region, absIPDir, waitTimeout)
-		fmt.Println(result) // Send result back to the parent process
+		fmt.Println(result)
 	}
+
+	// If we get here, the parent has closed the pipe or we've reached EOF
+	// Clean up before exiting
+	fmt.Println("Parent process closed connection, cleaning up...")
+	fw.UnblockAll()
 
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("ERROR: Error reading input: %v\n", err)
 		os.Exit(config.ExitErrorInvalidArgs)
 	}
+
+	os.Exit(config.ExitSuccess)
 }
 
-// Execute an action and return the result
 func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string, waitTimeout int) string {
-	// Make IP directory path absolute if it's relative
 	absIPDir, err := filepath.Abs(ipDir)
 	if err != nil {
 		return fmt.Sprintf("ERROR: Failed to resolve IP directory path: %v", err)
 	}
 
-	// Handle different actions
 	switch action {
 	case config.ActionBlock:
-		// Check if Overwatch is running
 		isRunning, err := process.IsOverwatchRunning()
 		if err != nil {
 			return fmt.Sprintf("ERROR: Failed to check if Overwatch is running: %v", err)
@@ -123,15 +125,17 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		if isRunning {
 			result := "Overwatch is currently running.\n"
 			result += "Waiting for Overwatch to close before applying firewall rules..."
-			
-			// Wait for Overwatch to close
+			fmt.Println(result) // This ensures the GUI gets immediate notification
+
 			err = process.WaitForOverwatchToClose(waitTimeout)
 			if err != nil {
 				return fmt.Sprintf("%s\nERROR: %v", result, err)
 			}
+
+			// When Overwatch finally closes
+			fmt.Println("Overwatch has closed, proceeding with IP blocking...")
 		}
 
-		// Apply block
 		result := fmt.Sprintf("Blocking IPs for region %s...\n", region)
 		if err := fw.BlockIPs(region, absIPDir); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to block IPs: %v", result, err)
@@ -169,12 +173,10 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 	}
 }
 
-// Execute an action (one-shot mode)
 func executeAction(fw *firewall.Firewall, action, region, ipDir string, waitTimeout int) {
 	result := executeActionWithResult(fw, action, region, ipDir, waitTimeout)
 	fmt.Println(result)
-	
-	// Exit with appropriate code
+
 	if strings.Contains(result, "ERROR:") {
 		os.Exit(config.ExitErrorFirewall)
 	}

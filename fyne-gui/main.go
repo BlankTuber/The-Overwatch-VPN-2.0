@@ -4,14 +4,19 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
@@ -21,10 +26,14 @@ type OwVpnGui struct {
 	window        fyne.Window
 	logText       *widget.Label
 	statusLabel   *widget.Label
+	statusIcon    *canvas.Image
+	progressBar   *widget.ProgressBarInfinite
 	regionButtons map[string]*widget.Button
 	firewallCmd   *exec.Cmd
 	cmdStdin      io.WriteCloser
 	blocked       map[string]bool
+	waiting       bool
+	waitingMutex  sync.Mutex
 }
 
 func main() {
@@ -36,26 +45,31 @@ func main() {
 		window:        w,
 		logText:       widget.NewLabel("Starting application..."),
 		statusLabel:   widget.NewLabel("Initializing..."),
+		statusIcon:    canvas.NewImageFromResource(theme.InfoIcon()),
+		progressBar:   widget.NewProgressBarInfinite(),
 		regionButtons: make(map[string]*widget.Button),
 		blocked:       make(map[string]bool),
+		waiting:       false,
 	}
 
-	// Log display
+	gui.statusIcon.SetMinSize(fyne.NewSize(20, 20))
+	gui.progressBar.Hide()
+
 	gui.logText.Wrapping = fyne.TextWrapWord
 	scrollLog := container.NewScroll(gui.logText)
 	scrollLog.SetMinSize(fyne.NewSize(580, 150))
 
-	// Status bar
 	statusBox := container.NewHBox(
+		gui.statusIcon,
 		widget.NewLabel("Status:"),
 		gui.statusLabel,
+		gui.progressBar,
 	)
 
-	// Region buttons
 	regionButtons := container.NewGridWithColumns(4)
 	for _, region := range regions {
 		btn := widget.NewButton(fmt.Sprintf("Block %s", region), nil)
-		regionName := region // Capture for closure
+		regionName := region
 		btn.OnTapped = func() {
 			gui.toggleRegion(regionName)
 		}
@@ -63,12 +77,10 @@ func main() {
 		regionButtons.Add(btn)
 	}
 
-	// Unblock all button
 	unblockAllBtn := widget.NewButton("Unblock All Regions", func() {
 		gui.unblockAll()
 	})
 
-	// Construct layout
 	content := container.NewVBox(
 		statusBox,
 		widget.NewSeparator(),
@@ -82,32 +94,22 @@ func main() {
 
 	w.SetContent(content)
 
-	// Handle cleanup on close
 	w.SetOnClosed(func() {
 		gui.cleanup()
 	})
 
-	// Initialize in a goroutine to keep UI responsive
 	go gui.initialize()
 
-	// Display and run
 	w.ShowAndRun()
 }
 
 func (g *OwVpnGui) initialize() {
 	g.log("Initializing application...")
 
-	if !g.checkAdminPrivileges() {
-		g.log("WARNING: Administrator privileges required.")
-		g.setStatus("WARNING: Admin privileges required")
-		dialog.ShowError(fmt.Errorf("this application requires administrator privileges"), g.window)
-		return
-	}
-
 	g.log("Fetching IP addresses...")
 	if err := g.runIpPuller(); err != nil {
 		g.log(fmt.Sprintf("Error fetching IPs: %v", err))
-		g.setStatus("Error: IP Puller failed")
+		g.setStatus("Error: IP Puller failed", theme.ErrorIcon())
 		dialog.ShowError(fmt.Errorf("failed to run IP Puller: %v", err), g.window)
 		return
 	}
@@ -116,15 +118,14 @@ func (g *OwVpnGui) initialize() {
 	g.log("Starting firewall daemon...")
 	if err := g.startFirewallDaemon(); err != nil {
 		g.log(fmt.Sprintf("Error starting firewall daemon: %v", err))
-		g.setStatus("Error: Firewall daemon failed")
+		g.setStatus("Error: Firewall daemon failed", theme.ErrorIcon())
 		dialog.ShowError(fmt.Errorf("failed to start firewall daemon: %v", err), g.window)
 		return
 	}
 	g.log("Firewall daemon started successfully")
 
-	g.setStatus("Ready")
+	g.setStatus("Ready", theme.ConfirmIcon())
 
-	// Periodically check Overwatch status
 	go func() {
 		for {
 			g.checkStatus()
@@ -133,13 +134,13 @@ func (g *OwVpnGui) initialize() {
 	}()
 }
 
-func (g *OwVpnGui) checkAdminPrivileges() bool {
-	cmd := exec.Command("net", "session")
-	return cmd.Run() == nil
-}
-
 func (g *OwVpnGui) runIpPuller() error {
-	exePath := filepath.Join(".", "ip-puller.exe")
+	exePath, err := filepath.Abs(filepath.Join(filepath.Dir(os.Args[0]), "ip-puller.exe"))
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %v", err)
+	}
+
+	g.log("Running IP Puller...")
 	cmd := exec.Command(exePath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -149,7 +150,12 @@ func (g *OwVpnGui) runIpPuller() error {
 }
 
 func (g *OwVpnGui) startFirewallDaemon() error {
-	exePath := filepath.Join(".", "firewall-sidecar.exe")
+	exePath, err := filepath.Abs(filepath.Join(filepath.Dir(os.Args[0]), "firewall-sidecar.exe"))
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %v", err)
+	}
+
+	g.log("Starting firewall daemon...")
 	g.firewallCmd = exec.Command(exePath, "daemon")
 
 	stdin, err := g.firewallCmd.StdinPipe()
@@ -163,27 +169,111 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 		return fmt.Errorf("failed to create stdout pipe: %v", err)
 	}
 
+	stderr, err := g.firewallCmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("failed to create stderr pipe: %v", err)
+	}
+
 	if err := g.firewallCmd.Start(); err != nil {
 		return fmt.Errorf("failed to start firewall daemon: %v", err)
 	}
 
-	// Read output in a separate goroutine
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
 			text := scanner.Text()
-			g.log(text)
+			g.processFirewallOutput(text)
 		}
 	}()
 
-	// Wait a moment to ensure daemon is started
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			text := scanner.Text()
+			g.log(fmt.Sprintf("Error: %s", text))
+		}
+	}()
+
 	time.Sleep(500 * time.Millisecond)
 
 	return nil
 }
 
+func (g *OwVpnGui) processFirewallOutput(text string) {
+	// Log errors and success messages
+	if strings.Contains(text, "ERROR:") || strings.Contains(text, "Successfully") {
+		g.log(text)
+	}
+
+	// Detect waiting state
+	if strings.Contains(text, "Overwatch is currently running") ||
+		strings.Contains(text, "Waiting for Overwatch to close") {
+		g.setWaiting(true)
+		g.log("Waiting for Overwatch to close before applying changes...")
+		g.setStatus("Waiting for Overwatch to close", theme.WarningIcon())
+	}
+
+	// Detect operations in progress
+	if strings.Contains(text, "Blocking IPs") || strings.Contains(text, "Unblocking IPs") {
+		g.setWaiting(true)
+		g.setStatus("Working...", theme.InfoIcon())
+	}
+
+	// Detect completion
+	if strings.Contains(text, "Successfully blocked") ||
+		strings.Contains(text, "Successfully unblocked") ||
+		strings.Contains(text, "Successfully removed") {
+		g.setWaiting(false)
+		g.setStatus("Ready", theme.ConfirmIcon())
+	}
+
+	// Detect errors
+	if strings.Contains(text, "ERROR:") {
+		g.setWaiting(false)
+		g.setStatus("Error", theme.ErrorIcon())
+	}
+
+	// Status check response
+	if strings.Contains(text, "Status: Overwatch is currently running") {
+		g.setStatus("Overwatch is running", theme.InfoIcon())
+	} else if strings.Contains(text, "Status: Overwatch is not running") {
+		g.setStatus("Ready", theme.ConfirmIcon())
+	}
+}
+
+func (g *OwVpnGui) setWaiting(waiting bool) {
+	g.waitingMutex.Lock()
+	defer g.waitingMutex.Unlock()
+
+	if g.waiting == waiting {
+		return
+	}
+
+	g.waiting = waiting
+
+	if waiting {
+		g.progressBar.Show()
+		for _, btn := range g.regionButtons {
+			btn.Disable()
+		}
+	} else {
+		g.progressBar.Hide()
+		for _, btn := range g.regionButtons {
+			btn.Enable()
+		}
+	}
+
+	g.window.Canvas().Refresh(g.progressBar)
+}
+
 func (g *OwVpnGui) toggleRegion(region string) {
 	isBlocked := g.blocked[region]
+
+	// Don't allow toggling while in waiting state
+	if g.waiting {
+		g.log("Please wait for current operation to complete")
+		return
+	}
 
 	if isBlocked {
 		g.log(fmt.Sprintf("Unblocking region %s...", region))
@@ -194,6 +284,7 @@ func (g *OwVpnGui) toggleRegion(region string) {
 		g.blocked[region] = false
 		g.window.Canvas().Refresh(g.regionButtons[region])
 		g.regionButtons[region].SetText(fmt.Sprintf("Block %s", region))
+		g.setWaiting(true)
 	} else {
 		g.log(fmt.Sprintf("Blocking region %s...", region))
 		if err := g.sendCommand(fmt.Sprintf("block|%s", region)); err != nil {
@@ -203,10 +294,17 @@ func (g *OwVpnGui) toggleRegion(region string) {
 		g.blocked[region] = true
 		g.window.Canvas().Refresh(g.regionButtons[region])
 		g.regionButtons[region].SetText(fmt.Sprintf("Unblock %s", region))
+		g.setWaiting(true)
 	}
 }
 
 func (g *OwVpnGui) unblockAll() {
+	// Don't allow unblocking all while in waiting state
+	if g.waiting {
+		g.log("Please wait for current operation to complete")
+		return
+	}
+
 	g.log("Unblocking all regions...")
 	if err := g.sendCommand("unblock-all"); err != nil {
 		g.log(fmt.Sprintf("Error unblocking all regions: %v", err))
@@ -218,8 +316,7 @@ func (g *OwVpnGui) unblockAll() {
 		g.regionButtons[region].SetText(fmt.Sprintf("Block %s", region))
 	}
 	g.window.Canvas().Refresh(g.window.Content())
-
-	g.log("All regions unblocked")
+	g.setWaiting(true)
 }
 
 func (g *OwVpnGui) checkStatus() {
@@ -237,6 +334,13 @@ func (g *OwVpnGui) sendCommand(command string) error {
 	return err
 }
 
+func (g *OwVpnGui) setStatus(status string, icon fyne.Resource) {
+	g.statusLabel.SetText(status)
+	g.statusIcon.Resource = icon
+	g.window.Canvas().Refresh(g.statusLabel)
+	g.window.Canvas().Refresh(g.statusIcon)
+}
+
 func (g *OwVpnGui) log(message string) {
 	fmt.Println(message)
 	currentText := g.logText.Text
@@ -244,21 +348,38 @@ func (g *OwVpnGui) log(message string) {
 	g.window.Canvas().Refresh(g.logText)
 }
 
-func (g *OwVpnGui) setStatus(status string) {
-	g.statusLabel.SetText(status)
-	g.window.Canvas().Refresh(g.statusLabel)
-}
-
 func (g *OwVpnGui) cleanup() {
 	g.log("Cleaning up...")
 
-	_ = g.sendCommand("unblock-all")
+	// Send unblock-all command
+	if g.cmdStdin != nil {
+		_ = g.sendCommand("unblock-all")
+		// Give more time for the unblock operation to complete
+		time.Sleep(1 * time.Second)
+	}
 
-	time.Sleep(500 * time.Millisecond)
+	// Close stdin pipe to signal EOF to the sidecar
+	if g.cmdStdin != nil {
+		_ = g.cmdStdin.Close()
+	}
 
+	// Wait for firewall process to exit
 	if g.firewallCmd != nil && g.firewallCmd.Process != nil {
-		_ = g.firewallCmd.Process.Kill()
-		_ = g.firewallCmd.Wait()
+		// Give the process a chance to exit gracefully
+		waitCh := make(chan error, 1)
+		go func() {
+			waitCh <- g.firewallCmd.Wait()
+		}()
+
+		// Wait for process to exit or timeout
+		select {
+		case <-waitCh:
+			// Process exited
+		case <-time.After(2 * time.Second):
+			// Timeout, force kill
+			_ = g.firewallCmd.Process.Kill()
+			_ = g.firewallCmd.Wait()
+		}
 	}
 
 	g.log("Cleanup complete")

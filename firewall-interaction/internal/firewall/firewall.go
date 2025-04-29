@@ -11,54 +11,42 @@ import (
 	"quidque.no/ow-firewall-sidecar/internal/config"
 )
 
-// Firewall represents a Windows firewall manager
 type Firewall struct {
 	rulePrefix string
 	exePath    string
 }
 
-// New creates a new Firewall instance
 func New() *Firewall {
+	exePath := getOverwatchExePath()
 	return &Firewall{
 		rulePrefix: config.FirewallRulePrefix,
-		exePath:    getOverwatchExePath(),
+		exePath:    exePath,
 	}
 }
 
 func getOverwatchExePath() string {
-	// Check common installation paths
 	commonPaths := []string{
 		"C:\\Program Files\\Overwatch\\" + config.OverwatchProcessName,
 		"C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName,
 		"C:\\Program Files\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
 		"C:\\Program Files (x86)\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
 	}
-	
-	// Try to find from Battle.net registry entries
+
 	battleNetPaths := getBattleNetGamePaths()
 	if len(battleNetPaths) > 0 {
 		commonPaths = append(commonPaths, battleNetPaths...)
 	}
-	
-	// Check if any of these paths exist
+
 	for _, path := range commonPaths {
 		if fileExists(path) {
 			return path
 		}
 	}
-	
-	// Fall back to the default path if nothing else is found
+
 	return "C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName
 }
 
 func getBattleNetGamePaths() []string {
-	// This would normally use the golang.org/x/sys/windows/registry package
-	// to look for Battle.net installations in the Windows registry
-	// For example locations like:
-	// HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Blizzard Entertainment\Battle.net\InstallPath
-	// and then look for Overwatch in product-specific subkeys
-	
-	// For simplicity in this example, we're just checking some additional common paths
 	return []string{
 		"D:\\Games\\Overwatch\\" + config.OverwatchProcessName,
 		"D:\\Blizzard\\Overwatch\\" + config.OverwatchProcessName,
@@ -75,39 +63,98 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-// BlockIPs blocks the IPs in the specified region for Overwatch
 func (f *Firewall) BlockIPs(region string, ipListDir string) error {
-	// Construct the file path for the region's IP list
 	filePath := filepath.Join(ipListDir, fmt.Sprintf("%s.txt", region))
-	
-	// Read IPs from file
+
 	ips, err := readIPsFromFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read IP list: %w", err)
 	}
-	
-	// Create firewall rules for each IP
-	for _, ip := range ips {
-		err := f.createBlockRule(ip, region)
+
+	if len(ips) == 0 {
+		return fmt.Errorf("no IPs found for region %s", region)
+	}
+
+	// Bulk block IPs in batches
+	batchSize := 50
+	totalBatches := (len(ips) + batchSize - 1) / batchSize
+
+	fmt.Printf("Starting to block %d IPs for region %s in %d batches\n", len(ips), region, totalBatches)
+
+	for i := 0; i < len(ips); i += batchSize {
+		end := i + batchSize
+		if end > len(ips) {
+			end = len(ips)
+		}
+
+		batchNum := i/batchSize + 1
+		fmt.Printf("Processing batch %d of %d for region %s...\n", batchNum, totalBatches, region)
+
+		batch := ips[i:end]
+
+		// Create outbound rule for batch
+		ruleName := fmt.Sprintf("%s%s-Batch%d", f.rulePrefix, region, batchNum)
+		ipList := strings.Join(batch, ",")
+
+		err := f.execFirewallCmd("add", "rule",
+			"name="+ruleName,
+			"dir=out",
+			"action=block",
+			"program="+f.exePath,
+			"remoteip="+ipList)
+
 		if err != nil {
-			return fmt.Errorf("failed to create block rule for %s: %w", ip, err)
+			return err
+		}
+
+		// Create inbound rule for batch
+		err = f.execFirewallCmd("add", "rule",
+			"name="+ruleName+"-In",
+			"dir=in",
+			"action=block",
+			"program="+f.exePath,
+			"remoteip="+ipList)
+
+		if err != nil {
+			return err
 		}
 	}
-	
+
+	fmt.Printf("Successfully blocked %d IPs for region %s in %d batches\n", len(ips), region, totalBatches)
 	return nil
 }
 
-// UnblockIPs unblocks the IPs in the specified region
 func (f *Firewall) UnblockIPs(region string) error {
 	return f.removeRules(region)
 }
 
-// UnblockAll removes all firewall rules created by this application
 func (f *Firewall) UnblockAll() error {
-	return f.removeRules("")
+	fmt.Println("Cleaning up all firewall rules...")
+	rules, err := f.listRules()
+	if err != nil {
+		return fmt.Errorf("failed to list firewall rules: %w", err)
+	}
+
+	count := 0
+	for _, rule := range rules {
+		if strings.HasPrefix(rule, f.rulePrefix) {
+			err := f.execFirewallCmd("delete", "rule", "name="+rule)
+			if err != nil {
+				return fmt.Errorf("failed to delete rule %s: %w", rule, err)
+			}
+			count++
+		}
+	}
+
+	if count > 0 {
+		fmt.Printf("Successfully removed %d firewall rules\n", count)
+	} else {
+		fmt.Println("No firewall rules needed to be removed")
+	}
+
+	return nil
 }
 
-// readIPsFromFile reads IPs from a text file
 func readIPsFromFile(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -131,47 +178,17 @@ func readIPsFromFile(filePath string) ([]string, error) {
 	return ips, nil
 }
 
-// createBlockRule creates a Windows Firewall rule to block a specific IP for Overwatch
-func (f *Firewall) createBlockRule(ip, region string) error {
-	// Create unique rule name
-	ruleName := fmt.Sprintf("%s%s-%s", f.rulePrefix, region, sanitizeIP(ip))
-	
-	// Create outbound block rule
-	err := f.execFirewallCmd("add", "rule", 
-		"name="+ruleName,
-		"dir=out",
-		"action=block",
-		"program="+f.exePath,
-		"remoteip="+ip)
-	
-	if err != nil {
-		return err
-	}
-	
-	// Create inbound block rule
-	return f.execFirewallCmd("add", "rule", 
-		"name="+ruleName+"-In",
-		"dir=in",
-		"action=block",
-		"program="+f.exePath,
-		"remoteip="+ip)
-}
-
-// removeRules removes firewall rules for a specific region or all regions if region is empty
 func (f *Firewall) removeRules(region string) error {
-	// Construct the rule prefix to look for
 	prefix := f.rulePrefix
 	if region != "" {
 		prefix = prefix + region
 	}
-	
-	// Get all existing rules
+
 	rules, err := f.listRules()
 	if err != nil {
 		return err
 	}
-	
-	// Delete matching rules
+
 	for _, rule := range rules {
 		if strings.HasPrefix(rule, prefix) {
 			err := f.execFirewallCmd("delete", "rule", "name="+rule)
@@ -180,11 +197,10 @@ func (f *Firewall) removeRules(region string) error {
 			}
 		}
 	}
-	
+
 	return nil
 }
 
-// listRules lists all firewall rules created by this application
 func (f *Firewall) listRules() ([]string, error) {
 	cmd := exec.Command("netsh", "advfirewall", "firewall", "show", "rule", "name=all")
 	output, err := cmd.CombinedOutput()
@@ -210,25 +226,18 @@ func (f *Firewall) listRules() ([]string, error) {
 	return rules, nil
 }
 
-// execFirewallCmd executes a Windows firewall command
 func (f *Firewall) execFirewallCmd(args ...string) error {
 	allArgs := append([]string{"advfirewall", "firewall"}, args...)
 	cmd := exec.Command("netsh", allArgs...)
 	output, err := cmd.CombinedOutput()
-	
+
 	if err != nil {
 		return fmt.Errorf("firewall command failed: %s, error: %w", string(output), err)
 	}
-	
+
 	return nil
 }
 
-// sanitizeIP sanitizes an IP address for use in a rule name
-func sanitizeIP(ip string) string {
-	return strings.NewReplacer(".", "-", "/", "_", ":", "--").Replace(ip)
-}
-
-// IsAdminPrivilegesAvailable checks if the application has admin privileges
 func IsAdminPrivilegesAvailable() bool {
 	cmd := exec.Command("net", "session")
 	err := cmd.Run()
