@@ -11,81 +11,100 @@ import (
 )
 
 const (
-	TimeoutSeconds = 30
-
-	// URL for the GitHub source
+	TimeoutSeconds   = 30
 	UrlsContainerURL = "https://raw.githubusercontent.com/foryVERX/Overwatch-Server-Selector/main/ip_lists/urlsContainer.txt"
 )
 
-// FetchAndCategorizeIPs fetches IPs from GitHub and categorizes them by region
 func FetchAndCategorizeIPs() (map[regions.Region][]string, error) {
-	// Create HTTP client with timeout
 	client := &http.Client{
 		Timeout: time.Duration(TimeoutSeconds) * time.Second,
 	}
 
-	// Fetch URLs container
 	urlsContent, err := fetchContent(client, UrlsContainerURL)
 	if err != nil {
 		return nil, fmt.Errorf("error fetching URLs container: %w", err)
 	}
 
-	// Parse URLs
 	urls := parseURLs(urlsContent)
-
-	// Initialize map for IPs by region
 	ipsByRegion := make(map[regions.Region][]string)
 
-	// Process each URL and categorize IPs
-	for _, url := range urls {
-		// Skip special files
-		if !isIPFilesURL(url) {
+	urlChan := make(chan string)
+	resultChan := make(chan struct {
+		region regions.Region
+		ips    []string
+		err    error
+	})
+
+	workerCount := 5
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			for url := range urlChan {
+				result := struct {
+					region regions.Region
+					ips    []string
+					err    error
+				}{regions.UNK, nil, nil}
+
+				if !isIPFilesURL(url) {
+					resultChan <- result
+					continue
+				}
+
+				content, err := fetchContent(client, url)
+				if err != nil {
+					result.err = fmt.Errorf("error fetching content from %s: %v", url, err)
+					resultChan <- result
+					continue
+				}
+
+				region := getRegionFromURL(url)
+				if region == regions.UNK {
+					resultChan <- result
+					continue
+				}
+
+				ips := parseIPs(content)
+				result.region = region
+				result.ips = ips
+
+				resultChan <- result
+			}
+		}()
+	}
+
+	go func() {
+		for _, url := range urls {
+			urlChan <- url
+		}
+		close(urlChan)
+	}()
+
+	for i := 0; i < len(urls); i++ {
+		result := <-resultChan
+		if result.err != nil {
+			fmt.Printf("Warning: %v\n", result.err)
 			continue
 		}
-
-		// Fetch content
-		content, err := fetchContent(client, url)
-		if err != nil {
-			fmt.Printf("Warning: Error fetching content from %s: %v\n", url, err)
-			continue
-		}
-
-		// Determine region
-		region := getRegionFromURL(url)
-
-		// Skip unknown regions
-		if region == regions.UNK {
-			continue
-		}
-
-		// Parse IPs
-		ips := parseIPs(content)
-
-		// Add IPs to the region
-		if len(ips) > 0 {
-			fmt.Printf("Found %d IPs for region %s from %s\n", len(ips), region, getFilenameFromURL(url))
-			ipsByRegion[region] = append(ipsByRegion[region], ips...)
+		if len(result.ips) > 0 {
+			ipsByRegion[result.region] = append(ipsByRegion[result.region], result.ips...)
+			fmt.Printf("Found %d IPs for region %s\n", len(result.ips), result.region)
 		}
 	}
 
 	return ipsByRegion, nil
 }
 
-// fetchContent fetches content from a URL
 func fetchContent(client *http.Client, url string) (string, error) {
-	// Make HTTP request
 	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("error making HTTP request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	// Check response status code
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("HTTP request failed with status code: %d", resp.StatusCode)
 	}
 
-	// Read response body
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %w", err)
@@ -94,7 +113,6 @@ func fetchContent(client *http.Client, url string) (string, error) {
 	return string(body), nil
 }
 
-// parseURLs parses URLs from the container content
 func parseURLs(content string) []string {
 	var urls []string
 	lines := strings.Split(content, "\n")
@@ -109,14 +127,12 @@ func parseURLs(content string) []string {
 	return urls
 }
 
-// getFilenameFromURL extracts the filename from a URL
 func getFilenameFromURL(url string) string {
 	parts := strings.Split(url, "/")
 	filename := parts[len(parts)-1]
-	return strings.ReplaceAll(filename, "%20", " ") // Replace URL encoding
+	return strings.ReplaceAll(filename, "%20", " ")
 }
 
-// isIPFilesURL checks if a URL is for an IP-related file
 func isIPFilesURL(url string) bool {
 	filename := getFilenameFromURL(url)
 
@@ -127,11 +143,9 @@ func isIPFilesURL(url string) bool {
 		!strings.Contains(filename, "urlsContainer")
 }
 
-// getRegionFromURL extracts region from URL
 func getRegionFromURL(url string) regions.Region {
 	filename := getFilenameFromURL(url)
 
-	// Check for Ip_ranges_* files
 	if strings.Contains(filename, "Ip_ranges_EU") {
 		return regions.EU
 	} else if strings.Contains(filename, "Ip_ranges_NA_") {
@@ -153,7 +167,6 @@ func getRegionFromURL(url string) regions.Region {
 		return regions.AFR
 	}
 
-	// Check for cfg - * files
 	if strings.Contains(filename, "cfg - EU") {
 		return regions.EU
 	} else if strings.Contains(filename, "cfg - NA") {
@@ -173,7 +186,6 @@ func getRegionFromURL(url string) regions.Region {
 	return regions.UNK
 }
 
-// parseIPs parses IPs from the content
 func parseIPs(content string) []string {
 	var ips []string
 	lines := strings.Split(content, "\n")
@@ -184,22 +196,36 @@ func parseIPs(content string) []string {
 			continue
 		}
 
-		// Skip lines that don't look like IP ranges
 		if !looksLikeIPRange(line) {
 			continue
 		}
 
-		ips = append(ips, line)
+		ips = append(ips, normalizeIPRange(line))
 	}
 
 	return ips
 }
 
-// looksLikeIPRange checks if a line looks like an IP range
 func looksLikeIPRange(line string) bool {
-	// Check for IP range patterns
 	return strings.Contains(line, ".") &&
-		(strings.Contains(line, "/") || strings.Contains(line, "-") ||
+		(strings.Contains(line, "/") ||
+			strings.Contains(line, "-") ||
 			!strings.Contains(line, " ")) &&
-		!strings.Contains(line, "ipRangeName") // Skip configuration headers
+		!strings.Contains(line, "ipRangeName")
+}
+
+func normalizeIPRange(ipRange string) string {
+	if strings.Contains(ipRange, "/") {
+		return ipRange
+	}
+
+	if strings.Contains(ipRange, "-") {
+		return ipRange
+	}
+
+	if !strings.Contains(ipRange, "/") && strings.Count(ipRange, ".") == 3 {
+		return ipRange + "/32"
+	}
+
+	return ipRange
 }

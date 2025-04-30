@@ -72,17 +72,14 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string) {
 		os.Exit(config.ExitErrorIPListRead)
 	}
 
-	// Setup a heartbeat to detect if parent process died
 	go func() {
 		for {
-			// If stdin is closed, parent process has terminated
 			if _, err := os.Stdin.Stat(); err != nil {
 				fmt.Println("Parent process closed connection, cleaning up...")
 				fw.UnblockAll()
 				fmt.Println("Cleanup completed, exiting...")
 				os.Exit(config.ExitSuccess)
 			}
-			// Sleep to avoid excessive CPU usage - Windows compatible
 			time.Sleep(5 * time.Second)
 		}
 	}()
@@ -108,7 +105,6 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string) {
 			customIPDir = parts[2]
 		}
 
-		// Handle exit command
 		if action == "exit" {
 			fmt.Println("Received exit command, cleaning up...")
 			fw.UnblockAll()
@@ -125,7 +121,6 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string) {
 		}
 	}
 
-	// If we get here, stdin was closed
 	fmt.Println("Parent process closed connection, cleaning up...")
 	fw.UnblockAll()
 	fmt.Println("Cleanup completed, exiting...")

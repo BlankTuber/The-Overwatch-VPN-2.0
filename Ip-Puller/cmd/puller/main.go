@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"sync"
 
 	"quidque.no/ow2-ip-puller/internal/api"
 	"quidque.no/ow2-ip-puller/internal/github"
@@ -12,60 +13,82 @@ import (
 )
 
 func main() {
-	// Define command-line flags
 	useGithub := flag.Bool("github", false, "Use alternative GitHub source (Overwatch-Server-Selector)")
+	useBoth := flag.Bool("both", false, "Use both sources (BGPView and GitHub)")
 	flag.Parse()
 
-	// Initialize region map
 	regions.InitRegionMap()
 
-	var ipsByRegion map[regions.Region][]string
-	var outputDir string
+	var wg sync.WaitGroup
+	var apiIPsByRegion, githubIPsByRegion map[regions.Region][]string
+	var apiErr, githubErr error
 
-	if *useGithub {
-		// Use GitHub source
-		fmt.Println("Using GitHub source from Overwatch-Server-Selector...")
-		outputDir = "ips_mina"
-
-		// Fetch and categorize IPs from GitHub
-		var err error
-		ipsByRegion, err = github.FetchAndCategorizeIPs()
-		if err != nil {
-			exitWithError(err)
-		}
-	} else {
-		// Use original API source
-		fmt.Println("Using default API source (BGPView)...")
-		outputDir = "ips"
-
-		// Fetch IP prefixes
-		data, err := api.FetchIPPrefixes()
-		if err != nil {
-			exitWithError(err)
-		}
-
-		// Parse IP prefixes
-		response, err := api.ParseIPPrefixes(data)
-		if err != nil {
-			exitWithError(err)
-		}
-
-		// Categorize IPs by region
-		ipsByRegion = regions.CategorizeIPsByRegion(response)
+	if !*useGithub || *useBoth {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("Using default API source (BGPView)...")
+			apiIPsByRegion, apiErr = fetchFromAPI()
+			if apiErr != nil {
+				fmt.Printf("Error fetching from API: %v\n", apiErr)
+			} else {
+				outputDir := "ips"
+				if err := output.CreateOutputDirectory(outputDir); err != nil {
+					apiErr = fmt.Errorf("error creating output directory: %w", err)
+					return
+				}
+				output.WriteIPsToFilesWithDir(apiIPsByRegion, outputDir)
+				fmt.Printf("Successfully processed IP ranges and saved to %s/ directory\n", outputDir)
+			}
+		}()
 	}
 
-	// Create output directory
-	if err := output.CreateOutputDirectory(outputDir); err != nil {
-		exitWithError(fmt.Errorf("error creating output directory: %w", err))
+	if *useGithub || *useBoth {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("Using GitHub source from Overwatch-Server-Selector...")
+			githubIPsByRegion, githubErr = fetchFromGitHub()
+			if githubErr != nil {
+				fmt.Printf("Error fetching from GitHub: %v\n", githubErr)
+			} else {
+				outputDir := "ips_mina"
+				if err := output.CreateOutputDirectory(outputDir); err != nil {
+					githubErr = fmt.Errorf("error creating output directory: %w", err)
+					return
+				}
+				output.WriteIPsToFilesWithDir(githubIPsByRegion, outputDir)
+				fmt.Printf("Successfully processed IP ranges and saved to %s/ directory\n", outputDir)
+			}
+		}()
 	}
 
-	// Write IPs to files
-	output.WriteIPsToFilesWithDir(ipsByRegion, outputDir)
+	wg.Wait()
 
-	fmt.Printf("Successfully processed IP ranges and saved to %s/ directory\n", outputDir)
+	if (*useGithub && githubErr != nil) || (!*useGithub && apiErr != nil) ||
+		(*useBoth && apiErr != nil && githubErr != nil) {
+		exitWithError(fmt.Errorf("failed to fetch IP data from requested sources"))
+	}
 }
 
-// Print error and exit
+func fetchFromAPI() (map[regions.Region][]string, error) {
+	data, err := api.FetchIPPrefixes()
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := api.ParseIPPrefixes(data)
+	if err != nil {
+		return nil, err
+	}
+
+	return regions.CategorizeIPsByRegion(response), nil
+}
+
+func fetchFromGitHub() (map[regions.Region][]string, error) {
+	return github.FetchAndCategorizeIPs()
+}
+
 func exitWithError(err error) {
 	fmt.Println(err)
 	os.Exit(1)
