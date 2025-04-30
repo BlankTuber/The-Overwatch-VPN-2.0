@@ -22,7 +22,7 @@ func main() {
 		os.Exit(config.ExitErrorAdminRights)
 	}
 
-	action := flag.String("action", "", "Action to perform: block, unblock, unblock-all, status")
+	action := flag.String("action", "", "Action to perform: block, unblock, unblock-all, status, set-path, get-path")
 	region := flag.String("region", "", "Region to block/unblock (EU, NA, AS, etc.)")
 	ipDir := flag.String("ip-dir", config.DefaultIPListDir, "Directory containing IP list files")
 	waitTimeout := flag.Int("wait-timeout", 0, "Timeout in seconds to wait for Overwatch to close (0 = no timeout)")
@@ -115,6 +115,16 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return fmt.Sprintf("ERROR: Failed to resolve IP directory path: %v", err)
 	}
 
+	// For most actions, validate that Overwatch path is configured first
+	if action != config.ActionSetPath &&
+		action != config.ActionGetPath &&
+		action != config.ActionUnblockAll &&
+		action != config.ActionStatus {
+		if !fw.HasOverwatchPath() {
+			return "ERROR: Overwatch path not configured. Please detect Overwatch path first."
+		}
+	}
+
 	switch action {
 	case config.ActionBlock:
 		isRunning, err := process.IsOverwatchRunning()
@@ -124,7 +134,7 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 
 		if isRunning {
 			result := "Overwatch is currently running. Waiting for Overwatch to close before applying firewall rules..."
-			
+
 			err = process.WaitForOverwatchToClose(waitTimeout)
 			if err != nil {
 				return fmt.Sprintf("%s\nERROR: %v", result, err)
@@ -149,7 +159,7 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return result + "Successfully unblocked IPs."
 
 	case config.ActionUnblockAll:
-		// We allow unblocking all even if Overwatch is running
+		// We allow unblocking all even if Overwatch is running or path not configured
 		result := "Unblocking all IPs...\n"
 		if err := fw.UnblockAll(); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to unblock all IPs: %v", result, err)
@@ -158,8 +168,21 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 
 	case config.ActionSetPath:
 		// Set custom Overwatch path
-		fw.SetOverwatchPath(region) // Using the region parameter to pass the path
+		if region == "" {
+			return "ERROR: Path parameter is required for set-path action"
+		}
+
+		if err := fw.SetOverwatchPath(region); err != nil {
+			return fmt.Sprintf("ERROR: Failed to set Overwatch path: %v", err)
+		}
 		return fmt.Sprintf("Overwatch path set to: %s", region)
+
+	case config.ActionGetPath:
+		path := fw.GetOverwatchPath()
+		if path == "" {
+			return "Overwatch path not configured"
+		}
+		return fmt.Sprintf("Current Overwatch path: %s", path)
 
 	case config.ActionStatus:
 		isRunning, err := process.IsOverwatchRunning()
@@ -167,10 +190,15 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 			return fmt.Sprintf("ERROR: Failed to check if Overwatch is running: %v", err)
 		}
 
+		pathStatus := ""
+		if !fw.HasOverwatchPath() {
+			pathStatus = " - Overwatch path not configured"
+		}
+
 		if isRunning {
-			return "Status: Overwatch is currently running"
+			return "Status: Overwatch is currently running" + pathStatus
 		} else {
-			return "Status: Overwatch is not running"
+			return "Status: Overwatch is not running" + pathStatus
 		}
 
 	default:

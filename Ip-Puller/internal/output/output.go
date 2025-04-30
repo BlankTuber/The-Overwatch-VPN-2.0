@@ -9,16 +9,28 @@ import (
 	"quidque.no/ow2-ip-puller/internal/regions"
 )
 
-// Output directory
-const OutputDir = "ips"
+// Default output directory
+const DefaultOutputDir = "ips"
 
 // CreateOutputDirectory creates the output directory
-func CreateOutputDirectory() error {
-	return os.MkdirAll(OutputDir, 0755)
+func CreateOutputDirectory(dirName string) error {
+	if dirName == "" {
+		dirName = DefaultOutputDir
+	}
+	return os.MkdirAll(dirName, 0755)
 }
 
-// WriteIPsToFiles writes IPs to files by region
+// WriteIPsToFiles writes IPs to files by region using the default output directory
 func WriteIPsToFiles(ipsByRegion map[regions.Region][]string) {
+	WriteIPsToFilesWithDir(ipsByRegion, DefaultOutputDir)
+}
+
+// WriteIPsToFilesWithDir writes IPs to files by region using the specified output directory
+func WriteIPsToFilesWithDir(ipsByRegion map[regions.Region][]string, dirName string) {
+	if dirName == "" {
+		dirName = DefaultOutputDir
+	}
+
 	for region, ips := range ipsByRegion {
 		// Skip unknown region
 		if region == regions.UNK {
@@ -34,13 +46,26 @@ func WriteIPsToFiles(ipsByRegion map[regions.Region][]string) {
 		content := createFileContent(ips)
 
 		// Write to file
-		writeRegionFile(region, content)
+		writeRegionFile(region, content, dirName)
 	}
 }
 
 // createFileContent creates file content from IP list
 func createFileContent(ips []string) string {
-	content := strings.Join(ips, "\n")
+	// Remove duplicates
+	uniqueIPs := make(map[string]bool)
+	for _, ip := range ips {
+		uniqueIPs[ip] = true
+	}
+
+	// Convert back to slice
+	var uniqueIPsList []string
+	for ip := range uniqueIPs {
+		uniqueIPsList = append(uniqueIPsList, ip)
+	}
+
+	// Create content
+	content := strings.Join(uniqueIPsList, "\n")
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
@@ -48,8 +73,8 @@ func createFileContent(ips []string) string {
 }
 
 // writeRegionFile writes the region file
-func writeRegionFile(region regions.Region, content string) {
-	filename := filepath.Join(OutputDir, fmt.Sprintf("%s.txt", region))
+func writeRegionFile(region regions.Region, content string, dirName string) {
+	filename := filepath.Join(dirName, fmt.Sprintf("%s.txt", region))
 	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
 		fmt.Printf("Error writing to file %s: %v\n", filename, err)
 	} else {

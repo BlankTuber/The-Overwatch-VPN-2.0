@@ -9,7 +9,6 @@ if exist bin (
 )
 echo - Creating bin directory
 mkdir bin
-mkdir bin\ips
 
 echo.
 echo Building IP Puller...

@@ -10,7 +10,7 @@ import (
 
 // API URL and timeout
 const (
-	ApiURL = "https://api.bgpview.io/asn/57976/prefixes"
+	ApiURL         = "https://api.bgpview.io/asn/57976/prefixes"
 	TimeoutSeconds = 30
 )
 
@@ -39,7 +39,7 @@ func FetchIPPrefixes() ([]byte, error) {
 	client := &http.Client{
 		Timeout: time.Duration(TimeoutSeconds) * time.Second,
 	}
-	
+
 	// Make HTTP request
 	resp, err := client.Get(ApiURL)
 	if err != nil {
@@ -57,7 +57,7 @@ func FetchIPPrefixes() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error reading response body: %w", err)
 	}
-	
+
 	return body, nil
 }
 
@@ -72,6 +72,6 @@ func ParseIPPrefixes(data []byte) (*Response, error) {
 	if response.Status != "ok" {
 		return nil, fmt.Errorf("API returned error: %s", response.StatusMessage)
 	}
-	
+
 	return &response, nil
 }

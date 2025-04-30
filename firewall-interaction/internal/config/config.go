@@ -4,16 +4,16 @@ package config
 const (
 	// Overwatch process name
 	OverwatchProcessName = "Overwatch.exe"
-	
+
 	// Rule name prefix for firewall rules
 	FirewallRulePrefix = "OW-VPN-"
-	
+
 	// Default directory where IP list files are stored
 	DefaultIPListDir = "ips"
-	
+
 	// IPC socket name for communication with Tauri app
 	IPCSocketName = "ow-firewall-sidecar"
-	
+
 	// Exit codes
 	ExitSuccess           = 0
 	ExitErrorAdminRights  = 1
@@ -30,6 +30,7 @@ const (
 	ActionUnblockAll = "unblock-all"
 	ActionStatus     = "status"
 	ActionSetPath    = "set-path"
+	ActionGetPath    = "get-path"
 )
 
 // Firewall rule direction

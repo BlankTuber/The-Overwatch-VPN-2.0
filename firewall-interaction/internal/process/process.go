@@ -33,22 +33,22 @@ func IsOverwatchRunning() (bool, error) {
 // with a timeout in seconds (0 for no timeout)
 func WaitForOverwatchToClose(timeoutSeconds int) error {
 	start := time.Now()
-	
+
 	for {
 		running, err := IsOverwatchRunning()
 		if err != nil {
 			return err
 		}
-		
+
 		if !running {
 			return nil
 		}
-		
+
 		// Check if we've exceeded the timeout
 		if timeoutSeconds > 0 && time.Since(start).Seconds() > float64(timeoutSeconds) {
 			return fmt.Errorf("timeout waiting for Overwatch to close")
 		}
-		
+
 		// Wait a bit before checking again
 		time.Sleep(500 * time.Millisecond)
 	}

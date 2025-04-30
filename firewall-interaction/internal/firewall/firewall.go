@@ -14,75 +14,54 @@ import (
 )
 
 type Firewall struct {
-	rulePrefix string
-	exePath    string
+	rulePrefix   string
+	exePath      string
 	exePathMutex sync.RWMutex
+	pathFile     string
 }
 
 func New() *Firewall {
-	exePath := getOverwatchExePath()
-	return &Firewall{
+	fw := &Firewall{
 		rulePrefix: config.FirewallRulePrefix,
-		exePath:    exePath,
+		exePath:    "",
+		pathFile:   "overwatch_path.txt",
 	}
+
+	// Try to load the path from file
+	fw.loadPathFromFile()
+	return fw
 }
 
-func getOverwatchExePath() string {
-	commonPaths := []string{
-		"C:\\Program Files\\Overwatch\\" + config.OverwatchProcessName,
-		"C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName,
-		"C:\\Program Files\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
-		"C:\\Program Files (x86)\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
+// SavePathToFile saves the Overwatch path to a file
+func (f *Firewall) SavePathToFile() error {
+	f.exePathMutex.RLock()
+	path := f.exePath
+	f.exePathMutex.RUnlock()
+
+	if path == "" {
+		return fmt.Errorf("no Overwatch path configured")
 	}
 
-	// Add additional paths for the user location
-	userPaths := getUserOverwatchPaths()
-	if len(userPaths) > 0 {
-		commonPaths = append(commonPaths, userPaths...)
-	}
-
-	// Add Battle.net game paths
-	battleNetPaths := getBattleNetGamePaths()
-	if len(battleNetPaths) > 0 {
-		commonPaths = append(commonPaths, battleNetPaths...)
-	}
-
-	for _, path := range commonPaths {
-		if fileExists(path) {
-			fmt.Printf("Found Overwatch at: %s\n", path)
-			return path
-		}
-	}
-
-	fmt.Println("Could not find Overwatch path, using default")
-	return "C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName
+	return os.WriteFile(f.pathFile, []byte(path), 0644)
 }
 
-func getUserOverwatchPaths() []string {
-	// Get user's home directory
-	home, err := os.UserHomeDir()
+// LoadPathFromFile loads the Overwatch path from a file
+func (f *Firewall) loadPathFromFile() bool {
+	data, err := os.ReadFile(f.pathFile)
 	if err != nil {
-		return []string{}
+		return false
 	}
 
-	return []string{
-		filepath.Join(home, "Saved Games\\Battle.net\\Overwatch\\__retail__\\" + config.OverwatchProcessName),
-		filepath.Join(home, "Documents\\Overwatch\\__retail__\\" + config.OverwatchProcessName),
-		filepath.Join(home, "Games\\Battle.net\\Overwatch\\__retail__\\" + config.OverwatchProcessName),
+	path := strings.TrimSpace(string(data))
+	if path != "" && fileExists(path) {
+		f.exePathMutex.Lock()
+		f.exePath = path
+		f.exePathMutex.Unlock()
+		fmt.Printf("Loaded Overwatch path from file: %s\n", path)
+		return true
 	}
-}
 
-func getBattleNetGamePaths() []string {
-	return []string{
-		"D:\\Games\\Overwatch\\" + config.OverwatchProcessName,
-		"D:\\Blizzard\\Overwatch\\" + config.OverwatchProcessName,
-		"D:\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
-		"E:\\Games\\Overwatch\\" + config.OverwatchProcessName,
-		"D:\\Games\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
-		"D:\\Blizzard\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
-		"D:\\Battle.net\\Games\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
-		"E:\\Games\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
-	}
+	return false
 }
 
 func fileExists(filename string) bool {
@@ -94,10 +73,13 @@ func fileExists(filename string) bool {
 }
 
 // SetOverwatchPath sets the Overwatch executable path
-func (f *Firewall) SetOverwatchPath(path string) {
-	if path == "" || !fileExists(path) {
-		fmt.Printf("Warning: Invalid Overwatch path: %s\n", path)
-		return
+func (f *Firewall) SetOverwatchPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
+	if !fileExists(path) {
+		return fmt.Errorf("path does not exist: %s", path)
 	}
 
 	f.exePathMutex.Lock()
@@ -105,9 +87,35 @@ func (f *Firewall) SetOverwatchPath(path string) {
 
 	fmt.Printf("Setting Overwatch path to: %s\n", path)
 	f.exePath = path
+
+	// Save path to file
+	if err := f.SavePathToFile(); err != nil {
+		fmt.Printf("Warning: Failed to save path to file: %v\n", err)
+	}
+
+	return nil
+}
+
+// GetOverwatchPath returns the current Overwatch path
+func (f *Firewall) GetOverwatchPath() string {
+	f.exePathMutex.RLock()
+	defer f.exePathMutex.RUnlock()
+	return f.exePath
+}
+
+// HasOverwatchPath returns true if Overwatch path is configured
+func (f *Firewall) HasOverwatchPath() bool {
+	f.exePathMutex.RLock()
+	defer f.exePathMutex.RUnlock()
+	return f.exePath != ""
 }
 
 func (f *Firewall) BlockIPs(region string, ipListDir string) error {
+	// Check if Overwatch path is configured
+	if !f.HasOverwatchPath() {
+		return fmt.Errorf("Overwatch path not configured")
+	}
+
 	filePath := filepath.Join(ipListDir, fmt.Sprintf("%s.txt", region))
 
 	ips, err := readIPsFromFile(filePath)
