@@ -5,7 +5,6 @@ const (
 	FirewallRulePrefix     = "OW-VPN-"
 	DefaultIPListDir       = "ips"
 	DefaultGitHubIPListDir = "ips_mina"
-	IPCSocketName          = "ow-firewall-sidecar"
 	ExitSuccess            = 0
 	ExitErrorAdminRights   = 1
 	ExitErrorIPListRead    = 2
@@ -23,7 +22,8 @@ const (
 	ActionGetPath    = "get-path"
 )
 
-const (
-	DirectionInbound  = "in"
-	DirectionOutbound = "out"
-)
+type Config struct {
+	OverwatchPath    string `json:"overwatchPath"`
+	UseGithubSource  bool   `json:"useGithubSource"`
+	InitialSetupDone bool   `json:"initialSetupDone"`
+}

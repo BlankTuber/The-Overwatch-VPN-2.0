@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"quidque.no/ow-firewall-sidecar/internal/config"
 	"quidque.no/ow-firewall-sidecar/internal/firewall"
-	"quidque.no/ow-firewall-sidecar/internal/process"
 )
 
 func main() {
@@ -25,7 +25,6 @@ func main() {
 	action := flag.String("action", "", "Action to perform: block, unblock, unblock-all, status, set-path, get-path")
 	region := flag.String("region", "", "Region to block/unblock (EU, NA, AS, etc.)")
 	ipDir := flag.String("ip-dir", config.DefaultIPListDir, "Directory containing IP list files")
-	waitTimeout := flag.Int("wait-timeout", 0, "Timeout in seconds to wait for Overwatch to close (0 = no timeout)")
 	flag.Parse()
 
 	fw := firewall.New()
@@ -33,7 +32,7 @@ func main() {
 	setupCleanupHandler(fw)
 
 	if flag.Arg(0) == "daemon" {
-		runDaemonMode(fw, *ipDir, *waitTimeout)
+		runDaemonMode(fw, *ipDir)
 		return
 	}
 
@@ -49,7 +48,7 @@ func main() {
 		os.Exit(config.ExitErrorInvalidArgs)
 	}
 
-	executeAction(fw, *action, *region, *ipDir, *waitTimeout)
+	executeAction(fw, *action, *region, *ipDir)
 }
 
 func setupCleanupHandler(fw *firewall.Firewall) {
@@ -64,8 +63,8 @@ func setupCleanupHandler(fw *firewall.Firewall) {
 	}()
 }
 
-func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
-	fmt.Println("Starting firewall sidecar")
+func runDaemonMode(fw *firewall.Firewall, ipDir string) {
+	fmt.Println("Starting firewall sidecar daemon")
 
 	absIPDir, err := filepath.Abs(ipDir)
 	if err != nil {
@@ -73,9 +72,24 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
 		os.Exit(config.ExitErrorIPListRead)
 	}
 
+	// Setup a heartbeat to detect if parent process died
+	go func() {
+		for {
+			// If stdin is closed, parent process has terminated
+			if _, err := os.Stdin.Stat(); err != nil {
+				fmt.Println("Parent process closed connection, cleaning up...")
+				fw.UnblockAll()
+				fmt.Println("Cleanup completed, exiting...")
+				os.Exit(config.ExitSuccess)
+			}
+			// Sleep to avoid excessive CPU usage - Windows compatible
+			time.Sleep(5 * time.Second)
+		}
+	}()
+
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
-		command := scanner.Text()
+		command := strings.TrimSpace(scanner.Text())
 
 		if command == "" {
 			continue
@@ -103,16 +117,18 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
 		}
 
 		if customIPDir != "" {
-			result := executeActionWithResult(fw, action, region, customIPDir, waitTimeout)
+			result := executeActionWithResult(fw, action, region, customIPDir)
 			fmt.Println(result)
 		} else {
-			result := executeActionWithResult(fw, action, region, absIPDir, waitTimeout)
+			result := executeActionWithResult(fw, action, region, absIPDir)
 			fmt.Println(result)
 		}
 	}
 
+	// If we get here, stdin was closed
 	fmt.Println("Parent process closed connection, cleaning up...")
 	fw.UnblockAll()
+	fmt.Println("Cleanup completed, exiting...")
 
 	if err := scanner.Err(); err != nil {
 		fmt.Printf("ERROR: Error reading input: %v\n", err)
@@ -122,7 +138,7 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
 	os.Exit(config.ExitSuccess)
 }
 
-func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string, waitTimeout int) string {
+func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string) string {
 	absIPDir, err := filepath.Abs(ipDir)
 	if err != nil {
 		return fmt.Sprintf("ERROR: Failed to resolve IP directory path: %v", err)
@@ -139,15 +155,6 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 
 	switch action {
 	case config.ActionBlock:
-		isRunning, err := process.IsOverwatchRunning()
-		if err != nil {
-			return fmt.Sprintf("ERROR: Failed to check if Overwatch is running: %v", err)
-		}
-
-		if isRunning {
-			return "ERROR: Overwatch is currently running. Please close Overwatch before blocking IPs."
-		}
-
 		result := fmt.Sprintf("Blocking IPs for region %s from directory %s...\n", region, absIPDir)
 		if err := fw.BlockIPs(region, absIPDir); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to block IPs: %v", result, err)
@@ -186,29 +193,19 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return fmt.Sprintf("Current Overwatch path: %s", path)
 
 	case config.ActionStatus:
-		isRunning, err := process.IsOverwatchRunning()
-		if err != nil {
-			return fmt.Sprintf("ERROR: Failed to check if Overwatch is running: %v", err)
-		}
-
 		pathStatus := ""
 		if !fw.HasOverwatchPath() {
 			pathStatus = " - Overwatch path not configured"
 		}
-
-		if isRunning {
-			return "Status: Overwatch is currently running" + pathStatus
-		} else {
-			return "Status: Overwatch is not running" + pathStatus
-		}
+		return "Status: Ready" + pathStatus
 
 	default:
 		return fmt.Sprintf("ERROR: Unknown action '%s'", action)
 	}
 }
 
-func executeAction(fw *firewall.Firewall, action, region, ipDir string, waitTimeout int) {
-	result := executeActionWithResult(fw, action, region, ipDir, waitTimeout)
+func executeAction(fw *firewall.Firewall, action, region, ipDir string) {
+	result := executeActionWithResult(fw, action, region, ipDir)
 	fmt.Println(result)
 
 	if strings.Contains(result, "ERROR:") {
