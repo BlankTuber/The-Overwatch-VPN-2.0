@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"quidque.no/ow-firewall-sidecar/internal/config"
@@ -15,6 +16,7 @@ import (
 type Firewall struct {
 	rulePrefix string
 	exePath    string
+	exePathMutex sync.RWMutex
 }
 
 func New() *Firewall {
@@ -33,6 +35,13 @@ func getOverwatchExePath() string {
 		"C:\\Program Files (x86)\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
 	}
 
+	// Add additional paths for the user location
+	userPaths := getUserOverwatchPaths()
+	if len(userPaths) > 0 {
+		commonPaths = append(commonPaths, userPaths...)
+	}
+
+	// Add Battle.net game paths
 	battleNetPaths := getBattleNetGamePaths()
 	if len(battleNetPaths) > 0 {
 		commonPaths = append(commonPaths, battleNetPaths...)
@@ -40,11 +49,27 @@ func getOverwatchExePath() string {
 
 	for _, path := range commonPaths {
 		if fileExists(path) {
+			fmt.Printf("Found Overwatch at: %s\n", path)
 			return path
 		}
 	}
 
+	fmt.Println("Could not find Overwatch path, using default")
 	return "C:\\Program Files (x86)\\Overwatch\\" + config.OverwatchProcessName
+}
+
+func getUserOverwatchPaths() []string {
+	// Get user's home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return []string{}
+	}
+
+	return []string{
+		filepath.Join(home, "Saved Games\\Battle.net\\Overwatch\\__retail__\\" + config.OverwatchProcessName),
+		filepath.Join(home, "Documents\\Overwatch\\__retail__\\" + config.OverwatchProcessName),
+		filepath.Join(home, "Games\\Battle.net\\Overwatch\\__retail__\\" + config.OverwatchProcessName),
+	}
 }
 
 func getBattleNetGamePaths() []string {
@@ -53,6 +78,10 @@ func getBattleNetGamePaths() []string {
 		"D:\\Blizzard\\Overwatch\\" + config.OverwatchProcessName,
 		"D:\\Battle.net\\Games\\Overwatch\\" + config.OverwatchProcessName,
 		"E:\\Games\\Overwatch\\" + config.OverwatchProcessName,
+		"D:\\Games\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
+		"D:\\Blizzard\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
+		"D:\\Battle.net\\Games\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
+		"E:\\Games\\Overwatch\\__retail__\\" + config.OverwatchProcessName,
 	}
 }
 
@@ -62,6 +91,20 @@ func fileExists(filename string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+// SetOverwatchPath sets the Overwatch executable path
+func (f *Firewall) SetOverwatchPath(path string) {
+	if path == "" || !fileExists(path) {
+		fmt.Printf("Warning: Invalid Overwatch path: %s\n", path)
+		return
+	}
+
+	f.exePathMutex.Lock()
+	defer f.exePathMutex.Unlock()
+
+	fmt.Printf("Setting Overwatch path to: %s\n", path)
+	f.exePath = path
 }
 
 func (f *Firewall) BlockIPs(region string, ipListDir string) error {
@@ -76,11 +119,17 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 		return fmt.Errorf("no IPs found for region %s", region)
 	}
 
+	// Get thread-safe copy of exePath
+	f.exePathMutex.RLock()
+	exePath := f.exePath
+	f.exePathMutex.RUnlock()
+
 	// Bulk block IPs in batches
 	batchSize := 50
 	totalBatches := (len(ips) + batchSize - 1) / batchSize
 
 	fmt.Printf("Starting to block %d IPs for region %s in %d batches\n", len(ips), region, totalBatches)
+	fmt.Printf("Using Overwatch executable path: %s\n", exePath)
 
 	for i := 0; i < len(ips); i += batchSize {
 		end := i + batchSize
@@ -101,7 +150,7 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 			"name="+ruleName,
 			"dir=out",
 			"action=block",
-			"program="+f.exePath,
+			"program="+exePath,
 			"remoteip="+ipList)
 
 		if err != nil {
@@ -113,7 +162,7 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 			"name="+ruleName+"-In",
 			"dir=in",
 			"action=block",
-			"program="+f.exePath,
+			"program="+exePath,
 			"remoteip="+ipList)
 
 		if err != nil {

@@ -29,6 +29,7 @@ const (
 	ActionUnblock    = "unblock"
 	ActionUnblockAll = "unblock-all"
 	ActionStatus     = "status"
+	ActionSetPath    = "set-path"
 )
 
 // Firewall rule direction

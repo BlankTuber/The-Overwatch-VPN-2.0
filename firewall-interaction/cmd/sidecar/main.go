@@ -123,10 +123,8 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		}
 
 		if isRunning {
-			result := "Overwatch is currently running.\n"
-			result += "Waiting for Overwatch to close before applying firewall rules..."
-			fmt.Println(result) // This ensures the GUI gets immediate notification
-
+			result := "Overwatch is currently running. Waiting for Overwatch to close before applying firewall rules..."
+			
 			err = process.WaitForOverwatchToClose(waitTimeout)
 			if err != nil {
 				return fmt.Sprintf("%s\nERROR: %v", result, err)
@@ -143,6 +141,7 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return result + "Successfully blocked IPs."
 
 	case config.ActionUnblock:
+		// We allow unblocking even if Overwatch is running
 		result := fmt.Sprintf("Unblocking IPs for region %s...\n", region)
 		if err := fw.UnblockIPs(region); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to unblock IPs: %v", result, err)
@@ -150,11 +149,17 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return result + "Successfully unblocked IPs."
 
 	case config.ActionUnblockAll:
+		// We allow unblocking all even if Overwatch is running
 		result := "Unblocking all IPs...\n"
 		if err := fw.UnblockAll(); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to unblock all IPs: %v", result, err)
 		}
 		return result + "Successfully unblocked all IPs."
+
+	case config.ActionSetPath:
+		// Set custom Overwatch path
+		fw.SetOverwatchPath(region) // Using the region parameter to pass the path
+		return fmt.Sprintf("Overwatch path set to: %s", region)
 
 	case config.ActionStatus:
 		isRunning, err := process.IsOverwatchRunning()
