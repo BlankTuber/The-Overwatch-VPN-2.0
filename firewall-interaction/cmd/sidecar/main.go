@@ -30,7 +30,6 @@ func main() {
 
 	fw := firewall.New()
 
-	// Set up cleanup on exit for any mode
 	setupCleanupHandler(fw)
 
 	if flag.Arg(0) == "daemon" {
@@ -53,7 +52,6 @@ func main() {
 	executeAction(fw, *action, *region, *ipDir, *waitTimeout)
 }
 
-// setupCleanupHandler ensures firewall rules are cleaned up on program exit
 func setupCleanupHandler(fw *firewall.Firewall) {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -79,7 +77,6 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
 	for scanner.Scan() {
 		command := scanner.Text()
 
-		// Check for EOF or empty input
 		if command == "" {
 			continue
 		}
@@ -88,16 +85,32 @@ func runDaemonMode(fw *firewall.Firewall, ipDir string, waitTimeout int) {
 
 		action := parts[0]
 		var region string
+		var customIPDir string
+
 		if len(parts) > 1 {
 			region = parts[1]
 		}
+		if len(parts) > 2 {
+			customIPDir = parts[2]
+		}
 
-		result := executeActionWithResult(fw, action, region, absIPDir, waitTimeout)
-		fmt.Println(result)
+		// Handle exit command
+		if action == "exit" {
+			fmt.Println("Received exit command, cleaning up...")
+			fw.UnblockAll()
+			fmt.Println("Cleanup completed, exiting...")
+			os.Exit(config.ExitSuccess)
+		}
+
+		if customIPDir != "" {
+			result := executeActionWithResult(fw, action, region, customIPDir, waitTimeout)
+			fmt.Println(result)
+		} else {
+			result := executeActionWithResult(fw, action, region, absIPDir, waitTimeout)
+			fmt.Println(result)
+		}
 	}
 
-	// If we get here, the parent has closed the pipe or we've reached EOF
-	// Clean up before exiting
 	fmt.Println("Parent process closed connection, cleaning up...")
 	fw.UnblockAll()
 
@@ -115,7 +128,6 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return fmt.Sprintf("ERROR: Failed to resolve IP directory path: %v", err)
 	}
 
-	// For most actions, validate that Overwatch path is configured first
 	if action != config.ActionSetPath &&
 		action != config.ActionGetPath &&
 		action != config.ActionUnblockAll &&
@@ -133,25 +145,16 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		}
 
 		if isRunning {
-			result := "Overwatch is currently running. Waiting for Overwatch to close before applying firewall rules..."
-
-			err = process.WaitForOverwatchToClose(waitTimeout)
-			if err != nil {
-				return fmt.Sprintf("%s\nERROR: %v", result, err)
-			}
-
-			// When Overwatch finally closes
-			fmt.Println("Overwatch has closed, proceeding with IP blocking...")
+			return "ERROR: Overwatch is currently running. Please close Overwatch before blocking IPs."
 		}
 
-		result := fmt.Sprintf("Blocking IPs for region %s...\n", region)
+		result := fmt.Sprintf("Blocking IPs for region %s from directory %s...\n", region, absIPDir)
 		if err := fw.BlockIPs(region, absIPDir); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to block IPs: %v", result, err)
 		}
 		return result + "Successfully blocked IPs."
 
 	case config.ActionUnblock:
-		// We allow unblocking even if Overwatch is running
 		result := fmt.Sprintf("Unblocking IPs for region %s...\n", region)
 		if err := fw.UnblockIPs(region); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to unblock IPs: %v", result, err)
@@ -159,7 +162,6 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return result + "Successfully unblocked IPs."
 
 	case config.ActionUnblockAll:
-		// We allow unblocking all even if Overwatch is running or path not configured
 		result := "Unblocking all IPs...\n"
 		if err := fw.UnblockAll(); err != nil {
 			return fmt.Sprintf("%sERROR: Failed to unblock all IPs: %v", result, err)
@@ -167,7 +169,6 @@ func executeActionWithResult(fw *firewall.Firewall, action, region, ipDir string
 		return result + "Successfully unblocked all IPs."
 
 	case config.ActionSetPath:
-		// Set custom Overwatch path
 		if region == "" {
 			return "ERROR: Path parameter is required for set-path action"
 		}

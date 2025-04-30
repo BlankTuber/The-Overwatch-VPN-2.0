@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -23,12 +25,16 @@ import (
 
 var regions = []string{"EU", "NA", "AS", "AFR", "ME", "OCE", "SA"}
 
-// Colors for UI elements
 var (
-	colorBlocked   = color.NRGBA{R: 217, G: 83, B: 79, A: 255}  // Red
-	colorUnblocked = color.NRGBA{R: 0, G: 177, B: 87, A: 255}   // Green
-	colorTitle     = color.NRGBA{R: 66, G: 139, B: 202, A: 255} // Blue
+	colorBlocked   = color.NRGBA{R: 217, G: 83, B: 79, A: 255}
+	colorUnblocked = color.NRGBA{R: 0, G: 177, B: 87, A: 255}
+	colorTitle     = color.NRGBA{R: 66, G: 139, B: 202, A: 255}
 )
+
+type Config struct {
+	OverwatchPath   string `json:"overwatchPath"`
+	UseGithubSource bool   `json:"useGithubSource"`
+}
 
 type OwVpnGui struct {
 	window             fyne.Window
@@ -46,10 +52,21 @@ type OwVpnGui struct {
 	overwatchPath      string
 	pathConfigured     bool
 	modalRef           fyne.CanvasObject
+	useGithubSource    bool
+	sourceToggle       *widget.Check
+	config             Config
+	configPath         string
+	isOverwatchRunning bool
+	processMutex       sync.Mutex
+	isInitialized      bool
+	isChangingSource   bool
 }
 
 func checkAdminPermissions() bool {
 	cmd := exec.Command("net", "session")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
 	return cmd.Run() == nil
 }
 
@@ -58,7 +75,6 @@ func main() {
 	w := a.NewWindow("Overwatch VPN 2.0")
 	w.Resize(fyne.NewSize(800, 600))
 
-	// Check for admin permissions first
 	if !checkAdminPermissions() {
 		showAdminPermissionsDialog(w)
 		w.ShowAndRun()
@@ -76,8 +92,12 @@ func main() {
 		blockingInProgress: false,
 		availableRegions:   []string{},
 		pathConfigured:     false,
+		configPath:         "config.json",
+		isInitialized:      false,
+		isChangingSource:   false,
 	}
 
+	gui.loadConfig()
 	gui.updateRegionButtons()
 
 	w.SetOnClosed(func() {
@@ -103,30 +123,65 @@ func showAdminPermissionsDialog(w fyne.Window) {
 	dialog.Show()
 }
 
-func (g *OwVpnGui) updateAvailableRegions() {
-	g.log("Checking available region IP lists...")
-	ipDir := "ips"
+func (g *OwVpnGui) loadConfig() {
+	data, err := os.ReadFile(g.configPath)
+	if err == nil {
+		if err := json.Unmarshal(data, &g.config); err == nil {
+			g.log(fmt.Sprintf("Loaded configuration from %s", g.configPath))
+			g.overwatchPath = g.config.OverwatchPath
+			g.useGithubSource = g.config.UseGithubSource
 
-	// Create the directory if it doesn't exist
-	if _, err := os.Stat(ipDir); os.IsNotExist(err) {
-		g.log("IP directory not found, will be created after IP Puller runs")
+			if g.overwatchPath != "" && fileExists(g.overwatchPath) {
+				g.pathConfigured = true
+				g.log(fmt.Sprintf("Using configured Overwatch path: %s", g.overwatchPath))
+			}
+		}
+	}
+}
+
+func (g *OwVpnGui) saveConfig() {
+	g.config.OverwatchPath = g.overwatchPath
+	g.config.UseGithubSource = g.useGithubSource
+
+	data, err := json.MarshalIndent(g.config, "", "  ")
+	if err != nil {
+		g.log(fmt.Sprintf("Error creating config JSON: %v", err))
 		return
 	}
 
-	// Clear the available regions
+	if err := os.WriteFile(g.configPath, data, 0644); err != nil {
+		g.log(fmt.Sprintf("Error writing config file: %v", err))
+	} else {
+		g.log("Configuration saved successfully")
+	}
+}
+
+func (g *OwVpnGui) getIPDirectory() string {
+	if g.useGithubSource {
+		return "ips_mina"
+	}
+	return "ips"
+}
+
+func (g *OwVpnGui) updateAvailableRegions() {
+	g.log("Checking available region IP lists...")
+	ipDir := g.getIPDirectory()
+
+	if _, err := os.Stat(ipDir); os.IsNotExist(err) {
+		g.log(fmt.Sprintf("IP directory %s not found, will be created after IP Puller runs", ipDir))
+		return
+	}
+
 	g.availableRegions = []string{}
 
-	// Check each region
 	for _, region := range regions {
 		filename := filepath.Join(ipDir, fmt.Sprintf("%s.txt", region))
 		if info, err := os.Stat(filename); err == nil && !info.IsDir() {
-			// File exists and is not a directory
 			g.availableRegions = append(g.availableRegions, region)
-			g.log(fmt.Sprintf("Found IP list for region: %s", region))
+			g.log(fmt.Sprintf("Found IP list for region: %s in %s", region, ipDir))
 		}
 	}
 
-	// Update the UI to show only available regions
 	g.updateRegionButtons()
 }
 
@@ -137,27 +192,26 @@ func (g *OwVpnGui) promptForOverwatchPath() {
 	)
 
 	detectBtn := widget.NewButton("Detect Overwatch", func() {
+		if g.modalRef != nil {
+			g.modalRef.(fyne.CanvasObject).Hide()
+		}
+
 		g.detectOverwatchPath()
 	})
 
 	buttonBox := container.NewCenter(detectBtn)
 	finalContent := container.NewVBox(content, buttonBox)
 
-	// Create a custom modal instead of a dialog to avoid the dismiss button
 	modal := widget.NewModalPopUp(finalContent, g.window.Canvas())
 	modal.Show()
 
-	// Store reference to the modal so we can dismiss it later
 	g.modalRef = modal
 
-	// Check periodically if we need to re-show the dialog
 	go func() {
 		for !g.pathConfigured {
 			time.Sleep(1 * time.Second)
 
-			// Check if the path was loaded from the firewall sidecar
 			if err := g.sendCommand("get-path"); err == nil {
-				// Give a moment for the response to be processed
 				time.Sleep(500 * time.Millisecond)
 				if g.pathConfigured {
 					modal.Hide()
@@ -166,7 +220,6 @@ func (g *OwVpnGui) promptForOverwatchPath() {
 			}
 		}
 
-		// Hide modal when path is configured
 		modal.Hide()
 	}()
 }
@@ -174,23 +227,34 @@ func (g *OwVpnGui) promptForOverwatchPath() {
 func (g *OwVpnGui) detectOverwatchPath() {
 	g.log("Attempting to detect Overwatch path...")
 
-	// Try to find the Overwatch process
 	if path, success := g.findOverwatchProcess(); success {
 		g.overwatchPath = path
 		g.pathConfigured = true
 		g.log(fmt.Sprintf("Detected Overwatch at: %s", path))
 
-		// Send path to firewall sidecar
 		if err := g.sendCommand(fmt.Sprintf("set-path|%s", path)); err != nil {
 			g.log(fmt.Sprintf("Error setting Overwatch path: %v", err))
 			g.pathConfigured = false
 		} else {
 			g.enableRegionButtons()
 			g.setStatus("Overwatch detected, ready to use", theme.ConfirmIcon())
+			g.saveConfig()
+		}
+
+		if g.modalRef != nil {
+			g.modalRef.(fyne.CanvasObject).Hide()
+			g.modalRef = nil
 		}
 	} else {
 		g.log("Could not detect Overwatch. Please make sure Overwatch is running.")
-		g.showOverwatchNotRunningDialog()
+
+		if g.isInitialized {
+			g.showOverwatchNotRunningDialog()
+		} else {
+			if g.modalRef != nil {
+				g.modalRef.(fyne.CanvasObject).Show()
+			}
+		}
 	}
 }
 
@@ -204,9 +268,13 @@ func (g *OwVpnGui) showOverwatchNotRunningDialog() {
 }
 
 func (g *OwVpnGui) findOverwatchProcess() (string, bool) {
-	// PowerShell command to find Overwatch process and its path
 	cmd := exec.Command("powershell", "-Command",
-		"Get-Process -Name 'Overwatch' | Select-Object -ExpandProperty Path")
+		"Get-Process -Name 'Overwatch' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Path")
+
+	// Hide the console window
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -221,9 +289,64 @@ func (g *OwVpnGui) findOverwatchProcess() (string, bool) {
 	return "", false
 }
 
+func (g *OwVpnGui) isOverwatchProcessRunning() bool {
+	cmd := exec.Command("powershell", "-Command",
+		"Get-Process -Name 'Overwatch' -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count")
+
+	// Hide the console window
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
+
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+
+	count := strings.TrimSpace(string(output))
+	return count != "0"
+}
+
+func (g *OwVpnGui) checkOverwatchProcessStatus() {
+	g.processMutex.Lock()
+	wasRunning := g.isOverwatchRunning
+	isRunning := g.isOverwatchProcessRunning()
+	g.isOverwatchRunning = isRunning
+	g.processMutex.Unlock()
+
+	if wasRunning && !isRunning {
+		g.log("Detected Overwatch has closed")
+		if g.pathConfigured {
+			g.setStatus("Ready", theme.ConfirmIcon())
+			g.enableRegionButtons()
+		}
+	} else if !wasRunning && isRunning {
+		g.log("Detected Overwatch is now running")
+		g.setStatus("Overwatch is running", theme.WarningIcon())
+		g.updateButtonStatesForOverwatchRunning()
+
+		if !g.pathConfigured && g.isInitialized {
+			g.detectOverwatchPath()
+		}
+	}
+}
+
+func (g *OwVpnGui) startProcessMonitoring() {
+	go func() {
+		time.Sleep(2 * time.Second)
+
+		for {
+			g.checkOverwatchProcessStatus()
+			time.Sleep(5 * time.Second)
+		}
+	}()
+}
+
 func (g *OwVpnGui) enableRegionButtons() {
-	for _, btn := range g.regionButtons {
-		btn.Enable()
+	for region, btn := range g.regionButtons {
+		if !g.isOverwatchRunning || g.blocked[region] {
+			btn.Enable()
+		}
 	}
 	g.window.Canvas().Refresh(g.window.Content())
 }
@@ -235,11 +358,19 @@ func (g *OwVpnGui) disableRegionButtons() {
 	g.window.Canvas().Refresh(g.window.Content())
 }
 
-func (g *OwVpnGui) updateRegionButtons() {
-	// Create a new grid with 3 columns
-	regionButtons := container.NewGridWithColumns(3)
+func (g *OwVpnGui) updateButtonStatesForOverwatchRunning() {
+	for region, btn := range g.regionButtons {
+		if g.isOverwatchRunning && !g.blocked[region] {
+			btn.Disable()
+		} else {
+			btn.Enable()
+		}
+	}
+	g.window.Canvas().Refresh(g.window.Content())
+}
 
-	// Clear current buttons
+func (g *OwVpnGui) updateRegionButtons() {
+	regionButtons := container.NewGridWithColumns(3)
 	g.regionButtons = make(map[string]*widget.Button)
 
 	if len(g.availableRegions) == 0 {
@@ -247,22 +378,18 @@ func (g *OwVpnGui) updateRegionButtons() {
 		regionButtons.Add(noRegionsLabel)
 	} else {
 		for _, region := range g.availableRegions {
-			// Create button with initial green/unblocked state
 			btn := widget.NewButton(region, nil)
-			btn.Importance = widget.SuccessImportance // Start as green
-			btn.SetIcon(theme.ContentRemoveIcon())    // Using remove icon as "unblocked" (removing restrictions)
+			btn.Importance = widget.SuccessImportance
+			btn.SetIcon(theme.ContentRemoveIcon())
 
-			// Initially disable buttons until Overwatch is configured
 			btn.Disable()
 
-			// Store region for callback
 			regionName := region
 
 			btn.OnTapped = func() {
 				g.toggleRegion(regionName)
 			}
 
-			// Create a container with the button
 			buttonContainer := container.NewPadded(btn)
 
 			g.regionButtons[region] = btn
@@ -270,8 +397,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 		}
 	}
 
-	// Create the updated content
-	titleLabel := canvas.NewText("OVERWATCH VPN", color.NRGBA{R: 66, G: 139, B: 202, A: 255})
+	titleLabel := canvas.NewText("OVERWATCH VPN", colorTitle)
 	titleLabel.TextSize = 28
 	titleLabel.TextStyle = fyne.TextStyle{Bold: true}
 	titleLabel.Alignment = fyne.TextAlignCenter
@@ -286,7 +412,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 		g.progressBar,
 	)
 
-	regionLabel := canvas.NewText("SELECT REGIONS TO BLOCK", color.NRGBA{R: 66, G: 139, B: 202, A: 255})
+	regionLabel := canvas.NewText("SELECT REGIONS TO BLOCK", colorTitle)
 	regionLabel.TextSize = 18
 	regionLabel.TextStyle = fyne.TextStyle{Bold: true}
 	regionLabel.Alignment = fyne.TextAlignCenter
@@ -297,13 +423,23 @@ func (g *OwVpnGui) updateRegionButtons() {
 	unblockAllBtn.Importance = widget.HighImportance
 	unblockAllBtnContainer := container.NewPadded(unblockAllBtn)
 
-	detectOverwatchBtn := widget.NewButton("DETECT OVERWATCH PATH", func() {
-		g.detectOverwatchPath()
-	})
-	detectOverwatchBtn.Importance = widget.WarningImportance
-	detectOverwatchBtnContainer := container.NewPadded(detectOverwatchBtn)
+	sourceToggleNew := widget.NewCheck("Use GitHub Source", nil)
+	sourceToggleNew.SetChecked(g.useGithubSource)
 
-	logLabel := canvas.NewText("CONNECTION LOG", color.NRGBA{R: 66, G: 139, B: 202, A: 255})
+	sourceToggleNew.OnChanged = func(value bool) {
+		if !g.isChangingSource && g.isInitialized {
+			g.isChangingSource = true
+			g.useGithubSource = value
+			g.saveConfig()
+			g.switchIPSource()
+			g.isChangingSource = false
+		}
+	}
+
+	g.sourceToggle = sourceToggleNew
+	sourceToggleContainer := container.NewPadded(g.sourceToggle)
+
+	logLabel := canvas.NewText("CONNECTION LOG", colorTitle)
 	logLabel.TextSize = 16
 	logLabel.TextStyle = fyne.TextStyle{Bold: true}
 	logLabel.Alignment = fyne.TextAlignCenter
@@ -318,7 +454,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 		container.NewPadded(regionLabel),
 		container.NewPadded(regionButtons),
 		container.NewCenter(unblockAllBtnContainer),
-		container.NewCenter(detectOverwatchBtnContainer),
+		container.NewCenter(sourceToggleContainer),
 		widget.NewSeparator(),
 		container.NewPadded(logLabel),
 		container.NewPadded(scrollLog),
@@ -327,22 +463,37 @@ func (g *OwVpnGui) updateRegionButtons() {
 	g.window.SetContent(container.NewPadded(content))
 }
 
+func (g *OwVpnGui) switchIPSource() {
+	g.log(fmt.Sprintf("Switching to %s source",
+		map[bool]string{true: "GitHub", false: "BGPView API"}[g.useGithubSource]))
+	g.updateAvailableRegions()
+}
+
 func (g *OwVpnGui) initialize() {
 	g.log("Initializing application...")
 
-	g.log("Fetching IP addresses...")
-	if err := g.runIpPuller(); err != nil {
-		g.log(fmt.Sprintf("Error fetching IPs: %v", err))
+	os.MkdirAll("ips", 0755)
+	os.MkdirAll("ips_mina", 0755)
+
+	g.log("Fetching IP addresses from BGPView API source...")
+	if err := g.runIpPuller(false); err != nil {
+		g.log(fmt.Sprintf("Error fetching IPs from BGPView API: %v", err))
 		g.setStatus("Error: IP Puller failed", theme.ErrorIcon())
 		dialog.ShowError(fmt.Errorf("failed to run IP Puller: %v", err), g.window)
 		return
 	}
-	g.log("Successfully fetched IP addresses")
+	g.log("Successfully fetched IPs from BGPView API")
 
-	// Check available regions and update UI
+	g.log("Fetching IP addresses from GitHub source...")
+	if err := g.runIpPuller(true); err != nil {
+		g.log(fmt.Sprintf("Error fetching IPs from GitHub: %v", err))
+	} else {
+		g.log("Successfully fetched IPs from GitHub")
+	}
+
 	g.updateAvailableRegions()
 
-	g.log("Starting firewall daemon...")
+	g.log("Initializing firewall sidecar...")
 	if err := g.startFirewallDaemon(); err != nil {
 		g.log(fmt.Sprintf("Error starting firewall daemon: %v", err))
 		g.setStatus("Error: Firewall daemon failed", theme.ErrorIcon())
@@ -351,15 +502,18 @@ func (g *OwVpnGui) initialize() {
 	}
 	g.log("Firewall daemon started successfully")
 
-	// Check if Overwatch path is already configured in firewall sidecar
 	if err := g.sendCommand("get-path"); err != nil {
 		g.log(fmt.Sprintf("Error checking Overwatch path: %v", err))
 	}
 
-	// Short delay to receive response
 	time.Sleep(500 * time.Millisecond)
 
-	// If path not configured, prompt user
+	g.startProcessMonitoring()
+
+	if !g.pathConfigured {
+		g.detectOverwatchPath()
+	}
+
 	if !g.pathConfigured {
 		g.setStatus("Overwatch path not configured", theme.WarningIcon())
 		g.promptForOverwatchPath()
@@ -368,26 +522,44 @@ func (g *OwVpnGui) initialize() {
 		g.enableRegionButtons()
 	}
 
+	g.isInitialized = true
+
 	go func() {
 		for {
 			g.checkStatus()
-			time.Sleep(5 * time.Second)
+			time.Sleep(10 * time.Second)
 		}
 	}()
 }
 
-func (g *OwVpnGui) runIpPuller() error {
+func (g *OwVpnGui) runIpPuller(useGithub bool) error {
 	exePath, err := filepath.Abs(filepath.Join(filepath.Dir(os.Args[0]), "ip-puller.exe"))
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	g.log("Running IP Puller...")
-	cmd := exec.Command(exePath)
+	var cmd *exec.Cmd
+	if useGithub {
+		cmd = exec.Command(exePath, "-github")
+	} else {
+		cmd = exec.Command(exePath)
+	}
+
+	// Hide the console window
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to execute IP Puller: %v - output: %s", err, string(output))
 	}
+
+	outputStr := string(output)
+	if len(outputStr) > 500 {
+		outputStr = outputStr[:500] + "... [output truncated]"
+	}
+	g.log(fmt.Sprintf("IP Puller output: %s", outputStr))
 	return nil
 }
 
@@ -397,8 +569,13 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 		return fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	g.log("Starting firewall daemon...")
+	g.log("Starting firewall daemon process...")
 	g.firewallCmd = exec.Command(exePath, "daemon")
+
+	// Hide the console window
+	g.firewallCmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow: true,
+	}
 
 	stdin, err := g.firewallCmd.StdinPipe()
 	if err != nil {
@@ -457,6 +634,7 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 		g.overwatchPath = strings.TrimPrefix(text, "Current Overwatch path: ")
 		g.log(fmt.Sprintf("Using Overwatch path: %s", g.overwatchPath))
 		g.enableRegionButtons()
+		g.saveConfig()
 	}
 
 	if strings.Contains(text, "Overwatch path set to:") {
@@ -464,26 +642,10 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 		g.overwatchPath = strings.TrimPrefix(text, "Overwatch path set to: ")
 		g.log(fmt.Sprintf("Overwatch path set to: %s", g.overwatchPath))
 		g.enableRegionButtons()
-	}
-
-	if strings.Contains(text, "Overwatch is currently running") ||
-		strings.Contains(text, "Waiting for Overwatch to close") {
-		g.setBlockingInProgress(true)
-		g.log("Waiting for Overwatch to close before applying block...")
-		g.setStatus("Waiting for Overwatch to close", theme.WarningIcon())
-	}
-
-	if strings.Contains(text, "Overwatch has closed, proceeding with IP blocking") {
-		g.log("Overwatch has closed, proceeding with IP blocking...")
-	}
-
-	if strings.Contains(text, "Blocking IPs") {
-		g.setBlockingInProgress(true)
-		g.setStatus("Blocking...", theme.InfoIcon())
+		g.saveConfig()
 	}
 
 	if strings.Contains(text, "Successfully blocked") {
-		g.setBlockingInProgress(false)
 		g.setStatus("Ready", theme.ConfirmIcon())
 	}
 
@@ -496,60 +658,11 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 	}
 
 	if strings.Contains(text, "ERROR:") {
-		g.setBlockingInProgress(false)
 		g.setStatus("Error", theme.ErrorIcon())
 	}
-
-	if strings.Contains(text, "Status: Overwatch is currently running") {
-		g.setStatus("Overwatch is running", theme.InfoIcon())
-	} else if strings.Contains(text, "Status: Overwatch is not running") {
-		if !g.pathConfigured {
-			g.setStatus("Overwatch path not configured", theme.WarningIcon())
-		} else {
-			g.setStatus("Ready", theme.ConfirmIcon())
-		}
-	}
-}
-
-func (g *OwVpnGui) setBlockingInProgress(blocking bool) {
-	g.blockingMutex.Lock()
-	defer g.blockingMutex.Unlock()
-
-	if g.blockingInProgress == blocking {
-		return
-	}
-
-	g.blockingInProgress = blocking
-
-	if blocking {
-		g.progressBar.Show()
-		// Only disable the block operations, not unblock
-		for region, btn := range g.regionButtons {
-			if !g.blocked[region] {
-				btn.Disable()
-			}
-		}
-	} else {
-		g.progressBar.Hide()
-		// Only enable buttons if path is configured
-		if g.pathConfigured {
-			for _, btn := range g.regionButtons {
-				btn.Enable()
-			}
-		}
-	}
-
-	g.window.Canvas().Refresh(g.progressBar)
-}
-
-func (g *OwVpnGui) isBlockingInProgress() bool {
-	g.blockingMutex.Lock()
-	defer g.blockingMutex.Unlock()
-	return g.blockingInProgress
 }
 
 func (g *OwVpnGui) toggleRegion(region string) {
-	// Ensure Overwatch path is configured
 	if !g.pathConfigured {
 		g.log("Overwatch path not configured. Please detect Overwatch path first.")
 		g.promptForOverwatchPath()
@@ -559,7 +672,6 @@ func (g *OwVpnGui) toggleRegion(region string) {
 	isBlocked := g.blocked[region]
 
 	if isBlocked {
-		// Unblocking is always allowed
 		g.log(fmt.Sprintf("Unblocking region %s...", region))
 		if err := g.sendCommand(fmt.Sprintf("unblock|%s", region)); err != nil {
 			g.log(fmt.Sprintf("Error unblocking region %s: %v", region, err))
@@ -567,27 +679,38 @@ func (g *OwVpnGui) toggleRegion(region string) {
 		}
 		g.blocked[region] = false
 
-		// Use unblocked style (green with remove icon for "remove restrictions")
 		g.regionButtons[region].Importance = widget.SuccessImportance
 		g.regionButtons[region].SetText(region)
 		g.regionButtons[region].SetIcon(theme.ContentRemoveIcon())
 
+		if g.isOverwatchRunning {
+			g.regionButtons[region].Disable()
+		}
+
 		g.window.Canvas().Refresh(g.regionButtons[region])
 	} else {
-		// Check if blocking operations are in progress
-		if g.isBlockingInProgress() {
-			g.log("Please wait for current blocking operation to complete")
+		g.processMutex.Lock()
+		isRunning := g.isOverwatchRunning
+		g.processMutex.Unlock()
+
+		if isRunning {
+			g.log("Cannot block region while Overwatch is running. Please close Overwatch first.")
+			content := container.NewVBox(
+				widget.NewLabel("Overwatch is currently running."),
+				widget.NewLabel("Please close Overwatch before blocking regions."),
+			)
+			dialog.ShowCustom("Overwatch Running", "OK", content, g.window)
 			return
 		}
 
 		g.log(fmt.Sprintf("Blocking region %s...", region))
-		if err := g.sendCommand(fmt.Sprintf("block|%s", region)); err != nil {
+		ipDir := g.getIPDirectory()
+		if err := g.sendCommand(fmt.Sprintf("block|%s|%s", region, ipDir)); err != nil {
 			g.log(fmt.Sprintf("Error blocking region %s: %v", region, err))
 			return
 		}
 		g.blocked[region] = true
 
-		// Use blocked style (red with add icon for "add restrictions")
 		g.regionButtons[region].Importance = widget.DangerImportance
 		g.regionButtons[region].SetText(region)
 		g.regionButtons[region].SetIcon(theme.ContentAddIcon())
@@ -597,29 +720,25 @@ func (g *OwVpnGui) toggleRegion(region string) {
 }
 
 func (g *OwVpnGui) unblockAll() {
-	// Unblock all is always allowed, even during blocking operations
 	g.log("Unblocking all regions...")
 	if err := g.sendCommand("unblock-all"); err != nil {
 		g.log(fmt.Sprintf("Error unblocking all regions: %v", err))
 		return
 	}
 
-	// Reset all buttons to unblocked state
 	for region := range g.blocked {
 		g.blocked[region] = false
 		g.regionButtons[region].Importance = widget.SuccessImportance
 		g.regionButtons[region].SetText(region)
 		g.regionButtons[region].SetIcon(theme.ContentRemoveIcon())
 
-		// Only enable if path is configured
-		if g.pathConfigured {
+		if g.isOverwatchRunning {
+			g.regionButtons[region].Disable()
+		} else if g.pathConfigured {
 			g.regionButtons[region].Enable()
 		}
 	}
 	g.window.Canvas().Refresh(g.window.Content())
-
-	// Clear any blocking in progress
-	g.setBlockingInProgress(false)
 }
 
 func (g *OwVpnGui) checkStatus() {
@@ -655,23 +774,41 @@ func (g *OwVpnGui) log(message string) {
 
 func (g *OwVpnGui) cleanup() {
 	g.log("Cleaning up...")
-
-	// Hide the window during cleanup
 	g.window.Hide()
 
-	// Send cleanup command to the firewall daemon
 	if g.cmdStdin != nil {
 		g.log("Sending cleanup command to firewall daemon...")
-		_ = g.sendCommand("unblock-all")
 
-		// Close stdin pipe to signal EOF to the sidecar
+		if err := g.sendCommand("unblock-all"); err != nil {
+			g.log(fmt.Sprintf("Warning: Error sending unblock-all command: %v", err))
+		} else {
+			g.log("Waiting for cleanup to complete...")
+			time.Sleep(1 * time.Second)
+		}
+
+		if err := g.sendCommand("exit"); err != nil {
+			g.log(fmt.Sprintf("Warning: Error sending exit command: %v", err))
+		}
+
+		g.log("Closing connection to firewall daemon...")
 		_ = g.cmdStdin.Close()
 
-		// Let the firewall daemon clean up in the background
-		// The application will exit without waiting
+		g.log("Waiting for firewall daemon to exit...")
+		go func() {
+			_ = g.firewallCmd.Wait()
+		}()
+
+		time.Sleep(500 * time.Millisecond)
 	}
 
-	// Exit the application - the firewall daemon will clean up in the background
-	g.log("Cleanup initiated, exiting...")
+	g.log("Cleanup completed, exiting...")
 	os.Exit(0)
+}
+
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
 }
