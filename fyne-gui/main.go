@@ -19,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
@@ -38,27 +39,28 @@ type Config struct {
 }
 
 type OwVpnGui struct {
-	window             fyne.Window
-	logText            *widget.Label
-	statusLabel        *widget.Label
-	statusIcon         *canvas.Image
-	progressBar        *widget.ProgressBarInfinite
-	regionButtons      map[string]*widget.Button
-	firewallCmd        *exec.Cmd
-	cmdStdin           io.WriteCloser
-	blocked            map[string]bool
-	blockingInProgress bool
-	blockingMutex      sync.Mutex
-	availableRegions   []string
-	overwatchPath      string
-	pathConfigured     bool
-	useGithubSource    bool
-	config             Config
-	configPath         string
-	isOverwatchRunning bool
-	processMutex       sync.Mutex
-	isInitialized      bool
-	initialSetupDone   bool
+	window                 fyne.Window
+	logText                *widget.Label
+	statusLabel            *widget.Label
+	statusIcon             *canvas.Image
+	progressBar            *widget.ProgressBarInfinite
+	regionButtons          map[string]*widget.Button
+	firewallCmd            *exec.Cmd
+	cmdStdin               io.WriteCloser
+	blocked                map[string]bool
+	blockingInProgress     bool
+	blockingMutex          sync.Mutex
+	availableRegions       []string
+	overwatchPath          string
+	pathConfigured         bool
+	useGithubSource        bool
+	config                 Config
+	configPath             string
+	isOverwatchRunning     bool
+	processMutex           sync.Mutex
+	isInitialized          bool
+	initialSetupDone       bool
+	pendingDetectionDialog dialog.Dialog
 }
 
 func checkAdminPermissions() bool {
@@ -72,7 +74,7 @@ func checkAdminPermissions() bool {
 func main() {
 	a := app.New()
 	w := a.NewWindow("Overwatch VPN 2.0")
-	w.Resize(fyne.NewSize(800, 600))
+	w.Resize(fyne.NewSize(950, 650))
 
 	if !checkAdminPermissions() {
 		showAdminPermissionsDialog(w)
@@ -109,6 +111,91 @@ func main() {
 	w.ShowAndRun()
 }
 
+func (g *OwVpnGui) showDisclaimerModal() {
+	content := container.NewVBox(
+		widget.NewLabelWithStyle("Disclaimer", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewLabel(""),
+		widget.NewLabel("• This application modifies Windows Firewall rules to control which Overwatch servers you connect to"),
+		widget.NewLabel("• We are not affiliated with or endorsed by Blizzard Entertainment"),
+		widget.NewLabel("• Use at your own risk - blocking regions may affect matchmaking time"),
+		widget.NewLabel("• All firewall changes are automatically removed when you close the application"),
+	)
+
+	dialog.NewCustom("Important Information", "I Understand", content, g.window).Show()
+}
+
+func (g *OwVpnGui) showPendingDetectionDialog() {
+	if g.pendingDetectionDialog != nil {
+		return
+	}
+
+	content := container.NewVBox(
+		widget.NewLabelWithStyle("Overwatch Not Detected", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewLabel(""),
+		widget.NewLabel("Overwatch has not been detected yet."),
+		widget.NewLabel(""),
+		widget.NewLabel("Please start Overwatch to automatically detect and configure the application."),
+		widget.NewLabel(""),
+		widget.NewLabel("This dialog will close automatically once Overwatch is detected."),
+	)
+
+	// Create a custom dialog with no buttons
+	pendingDialog := dialog.NewCustomWithoutButtons("Waiting for Overwatch", content, g.window)
+
+	g.pendingDetectionDialog = pendingDialog
+	pendingDialog.Show()
+}
+
+func (g *OwVpnGui) showHowToUseWindow() {
+	tabs := container.NewAppTabs(
+		container.NewTabItem("Blocking Regions", container.NewVBox(
+			widget.NewLabelWithStyle("How to Block Regions", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewLabel(""),
+			widget.NewLabel("1. Wait for Overwatch to be closed"),
+			widget.NewLabel("2. Click on a region button to block it"),
+			widget.NewLabel("3. The button will turn red indicating the region is blocked"),
+			widget.NewLabel("4. Launch Overwatch to play with blocked regions"),
+		)),
+		container.NewTabItem("Unblocking Regions", container.NewVBox(
+			widget.NewLabelWithStyle("How to Unblock Regions", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewLabel(""),
+			widget.NewLabel("1. Click on a red (blocked) region button to unblock it"),
+			widget.NewLabel("2. Use the 'UNBLOCK ALL REGIONS' button to quickly unblock everything"),
+			widget.NewLabel("3. Unblocking works even while Overwatch is running"),
+		)),
+		container.NewTabItem("Application Flow", container.NewVBox(
+			widget.NewLabelWithStyle("Application Behavior", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewLabel(""),
+			widget.NewLabel("• When you start the app, it fetches the latest IP addresses"),
+			widget.NewLabel("• The app detects Overwatch automatically when it's running"),
+			widget.NewLabel("• When you close the app, all blocks are automatically removed"),
+		)),
+		container.NewTabItem("Important Notes", container.NewVBox(
+			widget.NewLabelWithStyle("Important Information", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewLabel(""),
+			widget.NewLabel("• You cannot block regions while Overwatch is running"),
+			widget.NewLabel("• If you can't connect to a game, try unblocking regions"),
+			widget.NewLabel("• All blocks are automatically removed when you close the app"),
+			widget.NewLabel("• The app requires administrator privileges for firewall access"),
+			widget.NewLabel("• This application is not affiliated with Blizzard Entertainment"),
+		)),
+		container.NewTabItem("Contact", container.NewVBox(
+			widget.NewLabelWithStyle("Contact Me", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewLabel(""),
+			widget.NewLabel("• If the app doesn't work, it is most likely a IP list issue"),
+			widget.NewLabel("• I'll try to fix it if I can, please contact me on email: support@quidque.no"),
+		)),
+	)
+
+	tabs.SetTabLocation(container.TabLocationTop)
+
+	content := container.NewStack(container.NewPadded(tabs))
+
+	helpDialog := dialog.NewCustom("How To Use", "Close", content, g.window)
+	helpDialog.Resize(fyne.NewSize(650, 450))
+	helpDialog.Show()
+}
+
 func showAdminPermissionsDialog(w fyne.Window) {
 	content := container.NewVBox(
 		widget.NewLabel("This application requires administrator privileges."),
@@ -129,7 +216,7 @@ func (g *OwVpnGui) loadConfig() {
 		if err := json.Unmarshal(data, &g.config); err == nil {
 			g.logImportant(fmt.Sprintf("Loaded configuration from %s", g.configPath))
 			g.overwatchPath = g.config.OverwatchPath
-			g.useGithubSource = true // Always use GitHub source
+			g.useGithubSource = true
 			g.initialSetupDone = g.config.InitialSetupDone
 
 			if g.overwatchPath != "" && fileExists(g.overwatchPath) {
@@ -145,7 +232,7 @@ func (g *OwVpnGui) loadConfig() {
 
 func (g *OwVpnGui) saveConfig() {
 	g.config.OverwatchPath = g.overwatchPath
-	g.config.UseGithubSource = true // Always use GitHub source
+	g.config.UseGithubSource = true
 	g.config.InitialSetupDone = g.initialSetupDone
 
 	data, err := json.MarshalIndent(g.config, "", "  ")
@@ -206,10 +293,21 @@ func (g *OwVpnGui) detectOverwatchPath() {
 			g.setStatus("Overwatch detected, ready to use", theme.ConfirmIcon())
 			g.initialSetupDone = true
 			g.saveConfig()
+
+			// Close the pending detection dialog if it exists
+			if g.pendingDetectionDialog != nil {
+				g.pendingDetectionDialog.Hide()
+				g.pendingDetectionDialog = nil
+			}
 		}
 	} else {
 		g.logImportant("Could not detect Overwatch. Please make sure Overwatch is installed.")
 		g.setStatus("Overwatch not detected", theme.WarningIcon())
+
+		// Show the pending detection dialog if it doesn't exist yet
+		if g.pendingDetectionDialog == nil && g.isInitialized {
+			g.showPendingDetectionDialog()
+		}
 	}
 }
 
@@ -272,6 +370,16 @@ func (g *OwVpnGui) checkOverwatchProcessStatus() {
 		if !g.pathConfigured && g.isInitialized && !g.initialSetupDone {
 			g.detectOverwatchPath()
 		}
+	}
+
+	// Check if we need to show or hide the pending detection dialog
+	if !g.pathConfigured && g.isInitialized {
+		if g.pendingDetectionDialog == nil {
+			g.showPendingDetectionDialog()
+		}
+	} else if g.pathConfigured && g.pendingDetectionDialog != nil {
+		g.pendingDetectionDialog.Hide()
+		g.pendingDetectionDialog = nil
 	}
 }
 
@@ -369,8 +477,18 @@ func (g *OwVpnGui) updateRegionButtons() {
 	unblockAllBtn.Importance = widget.HighImportance
 	unblockAllBtnContainer := container.NewPadded(unblockAllBtn)
 
-	disclaimerLabel := widget.NewLabel("Overwatch will be automatically detected when running.")
-	disclaimerLabel.Alignment = fyne.TextAlignCenter
+	howToUseBtn := widget.NewButtonWithIcon("HOW TO USE", theme.HelpIcon(), func() {
+		g.showHowToUseWindow()
+	})
+	howToUseBtn.Importance = widget.MediumImportance
+	howToUseBtnContainer := container.NewPadded(howToUseBtn)
+
+	buttonControls := container.NewHBox(
+		layout.NewSpacer(),
+		unblockAllBtnContainer,
+		howToUseBtnContainer,
+		layout.NewSpacer(),
+	)
 
 	logLabel := canvas.NewText("CONNECTION LOG", colorTitle)
 	logLabel.TextSize = 16
@@ -386,8 +504,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 		widget.NewSeparator(),
 		container.NewPadded(regionLabel),
 		container.NewPadded(regionButtons),
-		container.NewCenter(unblockAllBtnContainer),
-		container.NewCenter(disclaimerLabel),
+		container.NewPadded(buttonControls),
 		widget.NewSeparator(),
 		container.NewPadded(logLabel),
 		container.NewPadded(scrollLog),
@@ -410,10 +527,8 @@ func (g *OwVpnGui) initialize() {
 		if _, err := os.Stat(ipDir); err == nil {
 			dirExists = true
 
-			// Check version file first
 			versionFilePath := filepath.Join(ipDir, "IP_version.txt")
 			if _, err := os.Stat(versionFilePath); err == nil {
-				// Check if we need to update by running the IP puller with version check
 				needUpdateCmd := exec.Command(
 					filepath.Join(filepath.Dir(os.Args[0]), "ip-puller.exe"),
 					"-version=check",
@@ -467,7 +582,8 @@ func (g *OwVpnGui) initialize() {
 
 	g.startProcessMonitoring()
 
-	// Always try to detect Overwatch automatically
+	g.isInitialized = true
+
 	if !g.pathConfigured || g.isOverwatchRunning {
 		g.detectOverwatchPath()
 	}
@@ -475,12 +591,11 @@ func (g *OwVpnGui) initialize() {
 	if !g.pathConfigured {
 		g.setStatus("Overwatch not detected, will detect when launched", theme.WarningIcon())
 		g.logImportant("Overwatch path not configured - will detect automatically when game is launched")
+		g.showPendingDetectionDialog()
 	} else {
 		g.setStatus("Ready", theme.ConfirmIcon())
 		g.enableRegionButtons()
 	}
-
-	g.isInitialized = true
 
 	go func() {
 		for {
@@ -488,6 +603,8 @@ func (g *OwVpnGui) initialize() {
 			time.Sleep(10 * time.Second)
 		}
 	}()
+
+	g.showDisclaimerModal()
 }
 
 func (g *OwVpnGui) runIpPuller(useGithub bool) error {
@@ -524,11 +641,9 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 	g.logInfo("Starting firewall daemon process...")
 	g.firewallCmd = exec.Command(exePath, "daemon")
 
-	// Set the process as a child process
 	g.firewallCmd.SysProcAttr = &syscall.SysProcAttr{
-		HideWindow: true,
-		// This makes the process appear as a child in Task Manager
-		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+		HideWindow:    true,
+		CreationFlags: 0x08000000,
 	}
 
 	stdin, err := g.firewallCmd.StdinPipe()
@@ -569,7 +684,6 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 		}
 	}()
 
-	// Verify the daemon is responsive
 	time.Sleep(1 * time.Second)
 	if err := g.sendCommand("status"); err != nil {
 		g.logError("Initial communication with firewall daemon failed")
@@ -629,7 +743,6 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 	if strings.Contains(text, "ERROR:") {
 		g.setStatus("Error", theme.ErrorIcon())
 
-		// Parse specific error types
 		if strings.Contains(text, "failed to create") || strings.Contains(text, "failed to verify") {
 			dialog.ShowError(fmt.Errorf("Firewall operation failed: %s", text), g.window)
 		}
@@ -739,9 +852,7 @@ func (g *OwVpnGui) setStatus(status string, icon fyne.Resource) {
 	g.window.Canvas().Refresh(g.statusIcon)
 }
 
-// Log levels
 func (g *OwVpnGui) logImportant(message string) {
-	// Always log important messages (actions, errors, state changes)
 	fmt.Println(message)
 	timestamp := time.Now().Format("15:04:05")
 	formattedMsg := fmt.Sprintf("[%s] %s\n%s", timestamp, message, g.logText.Text)
@@ -750,7 +861,6 @@ func (g *OwVpnGui) logImportant(message string) {
 }
 
 func (g *OwVpnGui) logError(message string) {
-	// Always log errors
 	fmt.Println("ERROR: " + message)
 	timestamp := time.Now().Format("15:04:05")
 	formattedMsg := fmt.Sprintf("[%s] ERROR: %s\n%s", timestamp, message, g.logText.Text)
@@ -759,7 +869,6 @@ func (g *OwVpnGui) logError(message string) {
 }
 
 func (g *OwVpnGui) logInfo(message string) {
-	// Only print to console, don't add to UI log
 	fmt.Println(message)
 }
 
@@ -784,7 +893,6 @@ func (g *OwVpnGui) cleanup() {
 		g.logInfo("Closing connection to firewall daemon...")
 		_ = g.cmdStdin.Close()
 
-		// Wait for daemon to exit
 		timeoutChan := time.After(3 * time.Second)
 		cleanup := make(chan bool)
 
@@ -800,7 +908,6 @@ func (g *OwVpnGui) cleanup() {
 			g.logInfo("Firewall daemon exited normally")
 		case <-timeoutChan:
 			g.logInfo("Timeout waiting for daemon to exit")
-			// Force terminate if needed
 			if g.firewallCmd != nil && g.firewallCmd.Process != nil {
 				g.firewallCmd.Process.Kill()
 			}
