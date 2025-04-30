@@ -52,15 +52,12 @@ type OwVpnGui struct {
 	availableRegions   []string
 	overwatchPath      string
 	pathConfigured     bool
-	modalRef           fyne.CanvasObject
 	useGithubSource    bool
-	sourceToggle       *widget.Check
 	config             Config
 	configPath         string
 	isOverwatchRunning bool
 	processMutex       sync.Mutex
 	isInitialized      bool
-	isChangingSource   bool
 	initialSetupDone   bool
 }
 
@@ -96,8 +93,8 @@ func main() {
 		pathConfigured:     false,
 		configPath:         "config.json",
 		isInitialized:      false,
-		isChangingSource:   false,
 		initialSetupDone:   false,
+		useGithubSource:    true,
 	}
 
 	gui.loadConfig()
@@ -130,17 +127,17 @@ func (g *OwVpnGui) loadConfig() {
 	data, err := os.ReadFile(g.configPath)
 	if err == nil {
 		if err := json.Unmarshal(data, &g.config); err == nil {
-			g.log(fmt.Sprintf("Loaded configuration from %s", g.configPath))
+			g.logImportant(fmt.Sprintf("Loaded configuration from %s", g.configPath))
 			g.overwatchPath = g.config.OverwatchPath
-			g.useGithubSource = g.config.UseGithubSource
+			g.useGithubSource = true // Always use GitHub source
 			g.initialSetupDone = g.config.InitialSetupDone
 
 			if g.overwatchPath != "" && fileExists(g.overwatchPath) {
 				g.pathConfigured = true
-				g.log(fmt.Sprintf("Using configured Overwatch path: %s", g.overwatchPath))
+				g.logImportant(fmt.Sprintf("Using configured Overwatch path: %s", g.overwatchPath))
 			} else {
 				g.pathConfigured = false
-				g.log("Configured Overwatch path no longer exists, will need to re-detect")
+				g.logImportant("Configured Overwatch path no longer exists, will detect automatically")
 			}
 		}
 	}
@@ -148,35 +145,30 @@ func (g *OwVpnGui) loadConfig() {
 
 func (g *OwVpnGui) saveConfig() {
 	g.config.OverwatchPath = g.overwatchPath
-	g.config.UseGithubSource = g.useGithubSource
+	g.config.UseGithubSource = true // Always use GitHub source
 	g.config.InitialSetupDone = g.initialSetupDone
 
 	data, err := json.MarshalIndent(g.config, "", "  ")
 	if err != nil {
-		g.log(fmt.Sprintf("Error creating config JSON: %v", err))
+		g.logError(fmt.Sprintf("Error creating config JSON: %v", err))
 		return
 	}
 
 	if err := os.WriteFile(g.configPath, data, 0644); err != nil {
-		g.log(fmt.Sprintf("Error writing config file: %v", err))
-	} else {
-		g.log("Configuration saved successfully")
+		g.logError(fmt.Sprintf("Error writing config file: %v", err))
 	}
 }
 
 func (g *OwVpnGui) getIPDirectory() string {
-	if g.useGithubSource {
-		return "ips_mina"
-	}
-	return "ips"
+	return "ips_mina"
 }
 
 func (g *OwVpnGui) updateAvailableRegions() {
-	g.log("Checking available region IP lists...")
+	g.logInfo("Checking available region IP lists...")
 	ipDir := g.getIPDirectory()
 
 	if _, err := os.Stat(ipDir); os.IsNotExist(err) {
-		g.log(fmt.Sprintf("IP directory %s not found, will be created after IP Puller runs", ipDir))
+		g.logImportant(fmt.Sprintf("IP directory %s not found, will be created after IP Puller runs", ipDir))
 		return
 	}
 
@@ -190,7 +182,7 @@ func (g *OwVpnGui) updateAvailableRegions() {
 				continue
 			}
 			lineCount := strings.Count(string(fileContent), "\n") + 1
-			g.log(fmt.Sprintf("Found IP list for region %s with %d IPs", region, lineCount))
+			g.logInfo(fmt.Sprintf("Found IP list for region %s with %d IPs", region, lineCount))
 			g.availableRegions = append(g.availableRegions, region)
 		}
 	}
@@ -198,55 +190,16 @@ func (g *OwVpnGui) updateAvailableRegions() {
 	g.updateRegionButtons()
 }
 
-func (g *OwVpnGui) promptForOverwatchPath() {
-	content := container.NewVBox(
-		widget.NewLabel("You must locate Overwatch before using this application."),
-		widget.NewLabel("Please launch Overwatch, then click 'Detect Overwatch'."),
-	)
-
-	detectBtn := widget.NewButton("Detect Overwatch", func() {
-		if g.modalRef != nil {
-			g.modalRef.(fyne.CanvasObject).Hide()
-		}
-
-		g.detectOverwatchPath()
-	})
-
-	buttonBox := container.NewCenter(detectBtn)
-	finalContent := container.NewVBox(content, buttonBox)
-
-	modal := widget.NewModalPopUp(finalContent, g.window.Canvas())
-	modal.Show()
-
-	g.modalRef = modal
-
-	go func() {
-		for !g.pathConfigured {
-			time.Sleep(1 * time.Second)
-
-			if err := g.sendCommand("get-path"); err == nil {
-				time.Sleep(500 * time.Millisecond)
-				if g.pathConfigured {
-					modal.Hide()
-					return
-				}
-			}
-		}
-
-		modal.Hide()
-	}()
-}
-
 func (g *OwVpnGui) detectOverwatchPath() {
-	g.log("Attempting to detect Overwatch path...")
+	g.logImportant("Attempting to detect Overwatch path...")
 
 	if path, success := g.findOverwatchProcess(); success {
 		g.overwatchPath = path
 		g.pathConfigured = true
-		g.log(fmt.Sprintf("Detected Overwatch at: %s", path))
+		g.logImportant(fmt.Sprintf("Detected Overwatch at: %s", path))
 
 		if err := g.sendCommand(fmt.Sprintf("set-path|%s", path)); err != nil {
-			g.log(fmt.Sprintf("Error setting Overwatch path: %v", err))
+			g.logError(fmt.Sprintf("Error setting Overwatch path: %v", err))
 			g.pathConfigured = false
 		} else {
 			g.enableRegionButtons()
@@ -254,31 +207,10 @@ func (g *OwVpnGui) detectOverwatchPath() {
 			g.initialSetupDone = true
 			g.saveConfig()
 		}
-
-		if g.modalRef != nil {
-			g.modalRef.(fyne.CanvasObject).Hide()
-			g.modalRef = nil
-		}
 	} else {
-		g.log("Could not detect Overwatch. Please make sure Overwatch is running.")
-
-		if g.isInitialized {
-			g.showOverwatchNotRunningDialog()
-		} else {
-			if g.modalRef != nil {
-				g.modalRef.(fyne.CanvasObject).Show()
-			}
-		}
+		g.logImportant("Could not detect Overwatch. Please make sure Overwatch is installed.")
+		g.setStatus("Overwatch not detected", theme.WarningIcon())
 	}
-}
-
-func (g *OwVpnGui) showOverwatchNotRunningDialog() {
-	content := container.NewVBox(
-		widget.NewLabel("Overwatch process was not detected."),
-		widget.NewLabel("Please make sure Overwatch is running, then try again."),
-	)
-
-	dialog.ShowCustom("Overwatch Not Detected", "OK", content, g.window)
 }
 
 func (g *OwVpnGui) findOverwatchProcess() (string, bool) {
@@ -327,13 +259,13 @@ func (g *OwVpnGui) checkOverwatchProcessStatus() {
 	g.processMutex.Unlock()
 
 	if wasRunning && !isRunning {
-		g.log("Detected Overwatch has closed")
+		g.logImportant("Detected Overwatch has closed")
 		if g.pathConfigured {
 			g.setStatus("Ready", theme.ConfirmIcon())
 			g.enableRegionButtons()
 		}
 	} else if !wasRunning && isRunning {
-		g.log("Detected Overwatch is now running")
+		g.logImportant("Detected Overwatch is now running")
 		g.setStatus("Overwatch is running", theme.WarningIcon())
 		g.updateButtonStatesForOverwatchRunning()
 
@@ -388,7 +320,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 	g.regionButtons = make(map[string]*widget.Button)
 
 	if len(g.availableRegions) == 0 {
-		noRegionsLabel := widget.NewLabel("No region IP lists available. Please run IP Puller first.")
+		noRegionsLabel := widget.NewLabel("No region IP lists available. The application will fetch them automatically.")
 		regionButtons.Add(noRegionsLabel)
 	} else {
 		for _, region := range g.availableRegions {
@@ -437,21 +369,8 @@ func (g *OwVpnGui) updateRegionButtons() {
 	unblockAllBtn.Importance = widget.HighImportance
 	unblockAllBtnContainer := container.NewPadded(unblockAllBtn)
 
-	sourceToggleNew := widget.NewCheck("Use GitHub Source", nil)
-	sourceToggleNew.SetChecked(g.useGithubSource)
-
-	sourceToggleNew.OnChanged = func(value bool) {
-		if !g.isChangingSource && g.isInitialized {
-			g.isChangingSource = true
-			g.useGithubSource = value
-			g.saveConfig()
-			g.switchIPSource()
-			g.isChangingSource = false
-		}
-	}
-
-	g.sourceToggle = sourceToggleNew
-	sourceToggleContainer := container.NewPadded(g.sourceToggle)
+	disclaimerLabel := widget.NewLabel("Overwatch will be automatically detected when running.")
+	disclaimerLabel.Alignment = fyne.TextAlignCenter
 
 	logLabel := canvas.NewText("CONNECTION LOG", colorTitle)
 	logLabel.TextSize = 16
@@ -468,7 +387,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 		container.NewPadded(regionLabel),
 		container.NewPadded(regionButtons),
 		container.NewCenter(unblockAllBtnContainer),
-		container.NewCenter(sourceToggleContainer),
+		container.NewCenter(disclaimerLabel),
 		widget.NewSeparator(),
 		container.NewPadded(logLabel),
 		container.NewPadded(scrollLog),
@@ -477,37 +396,9 @@ func (g *OwVpnGui) updateRegionButtons() {
 	g.window.SetContent(container.NewPadded(content))
 }
 
-func (g *OwVpnGui) switchIPSource() {
-	g.log(fmt.Sprintf("Switching to %s source",
-		map[bool]string{true: "GitHub", false: "BGPView API"}[g.useGithubSource]))
-
-	g.log("Unblocking all regions before switching source...")
-	if err := g.sendCommand("unblock-all"); err != nil {
-		g.log(fmt.Sprintf("Error unblocking all regions: %v", err))
-	} else {
-		for region := range g.blocked {
-			g.blocked[region] = false
-			if g.regionButtons[region] != nil {
-				g.regionButtons[region].Importance = widget.SuccessImportance
-				g.regionButtons[region].SetText(region)
-				g.regionButtons[region].SetIcon(theme.ContentRemoveIcon())
-			}
-		}
-	}
-
-	g.updateAvailableRegions()
-
-	if g.isOverwatchRunning {
-		g.updateButtonStatesForOverwatchRunning()
-	} else {
-		g.enableRegionButtons()
-	}
-}
-
 func (g *OwVpnGui) initialize() {
-	g.log("Initializing application...")
+	g.logImportant("Initializing application...")
 
-	os.MkdirAll("ips", 0755)
 	os.MkdirAll("ips_mina", 0755)
 
 	needIPUpdate := true
@@ -519,88 +410,74 @@ func (g *OwVpnGui) initialize() {
 		if _, err := os.Stat(ipDir); err == nil {
 			dirExists = true
 
-			// Check if any region files exist and have content
-			for _, region := range regions {
-				filename := filepath.Join(ipDir, fmt.Sprintf("%s.txt", region))
-				if info, err := os.Stat(filename); err == nil && !info.IsDir() && info.Size() > 0 {
+			// Check version file first
+			versionFilePath := filepath.Join(ipDir, "IP_version.txt")
+			if _, err := os.Stat(versionFilePath); err == nil {
+				// Check if we need to update by running the IP puller with version check
+				needUpdateCmd := exec.Command(
+					filepath.Join(filepath.Dir(os.Args[0]), "ip-puller.exe"),
+					"-version=check",
+				)
+				needUpdateCmd.SysProcAttr = &syscall.SysProcAttr{
+					HideWindow: true,
+				}
+
+				output, err := needUpdateCmd.CombinedOutput()
+				if err == nil && strings.Contains(string(output), "No updates available") {
 					needIPUpdate = false
-					break
+					g.logImportant("IP files are up to date, skipping update check")
+				} else {
+					g.logImportant("IP update available, will fetch latest IP addresses")
 				}
 			}
 		}
 
-		if !dirExists || needIPUpdate {
-			g.log("IP files missing or empty, will fetch IP addresses")
-		} else {
-			g.log("Using existing IP files, skipping IP fetching")
+		if !dirExists {
+			g.logImportant("IP directory missing, will fetch IP addresses")
 		}
 	}
 
 	if needIPUpdate {
-		g.log("Fetching IP addresses from BGPView API source...")
-		if err := g.runIpPuller(false); err != nil {
-			g.log(fmt.Sprintf("Error fetching IPs from BGPView API: %v", err))
+		g.logImportant("Fetching IP addresses from GitHub source...")
+		if err := g.runIpPuller(true); err != nil {
+			g.logError(fmt.Sprintf("Error fetching IPs: %v", err))
 			g.setStatus("Error: IP Puller failed", theme.ErrorIcon())
 			dialog.ShowError(fmt.Errorf("failed to run IP Puller: %v", err), g.window)
 			return
 		}
-		g.log("Successfully fetched IPs from BGPView API")
-
-		g.log("Fetching IP addresses from GitHub source...")
-		if err := g.runIpPuller(true); err != nil {
-			g.log(fmt.Sprintf("Error fetching IPs from GitHub: %v", err))
-		} else {
-			g.log("Successfully fetched IPs from GitHub")
-		}
+		g.logImportant("Successfully fetched IPs from GitHub")
 	}
 
 	g.updateAvailableRegions()
 
-	g.log("Initializing firewall sidecar...")
+	g.logImportant("Initializing firewall sidecar...")
 	if err := g.startFirewallDaemon(); err != nil {
-		g.log(fmt.Sprintf("Error starting firewall daemon: %v", err))
+		g.logError(fmt.Sprintf("Error starting firewall daemon: %v", err))
 		g.setStatus("Error: Firewall daemon failed", theme.ErrorIcon())
 		dialog.ShowError(fmt.Errorf("failed to start firewall daemon: %v", err), g.window)
 		return
 	}
-	g.log("Firewall daemon started successfully")
+	g.logImportant("Firewall daemon started successfully")
 
 	if err := g.sendCommand("get-path"); err != nil {
-		g.log(fmt.Sprintf("Error checking Overwatch path: %v", err))
+		g.logError(fmt.Sprintf("Error checking Overwatch path: %v", err))
 	}
 
 	time.Sleep(500 * time.Millisecond)
 
 	g.startProcessMonitoring()
 
-	// Only do initial setup if not already done
-	if !g.initialSetupDone {
-		if !g.pathConfigured {
-			g.detectOverwatchPath()
-		}
+	// Always try to detect Overwatch automatically
+	if !g.pathConfigured || g.isOverwatchRunning {
+		g.detectOverwatchPath()
+	}
 
-		if !g.pathConfigured {
-			g.setStatus("Overwatch path not configured", theme.WarningIcon())
-			g.promptForOverwatchPath()
-		} else {
-			g.setStatus("Ready", theme.ConfirmIcon())
-			g.enableRegionButtons()
-		}
+	if !g.pathConfigured {
+		g.setStatus("Overwatch not detected, will detect when launched", theme.WarningIcon())
+		g.logImportant("Overwatch path not configured - will detect automatically when game is launched")
 	} else {
-		// For subsequent runs, just verify the path
-		if g.pathConfigured {
-			if err := g.sendCommand(fmt.Sprintf("set-path|%s", g.overwatchPath)); err != nil {
-				g.log(fmt.Sprintf("Error setting Overwatch path: %v", err))
-				g.pathConfigured = false
-				g.promptForOverwatchPath()
-			} else {
-				g.setStatus("Ready", theme.ConfirmIcon())
-				g.enableRegionButtons()
-			}
-		} else {
-			g.setStatus("Overwatch path not configured", theme.WarningIcon())
-			g.promptForOverwatchPath()
-		}
+		g.setStatus("Ready", theme.ConfirmIcon())
+		g.enableRegionButtons()
 	}
 
 	g.isInitialized = true
@@ -621,7 +498,7 @@ func (g *OwVpnGui) runIpPuller(useGithub bool) error {
 
 	var cmd *exec.Cmd
 	if useGithub {
-		cmd = exec.Command(exePath, "-github")
+		cmd = exec.Command(exePath, "-version=force")
 	} else {
 		cmd = exec.Command(exePath)
 	}
@@ -635,11 +512,6 @@ func (g *OwVpnGui) runIpPuller(useGithub bool) error {
 		return fmt.Errorf("failed to execute IP Puller: %v - output: %s", err, string(output))
 	}
 
-	outputStr := string(output)
-	if len(outputStr) > 500 {
-		outputStr = outputStr[:500] + "... [output truncated]"
-	}
-	g.log(fmt.Sprintf("IP Puller output: %s", outputStr))
 	return nil
 }
 
@@ -649,7 +521,7 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 		return fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	g.log("Starting firewall daemon process...")
+	g.logInfo("Starting firewall daemon process...")
 	g.firewallCmd = exec.Command(exePath, "daemon")
 
 	// Set the process as a child process
@@ -679,7 +551,7 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 		return fmt.Errorf("failed to start firewall daemon: %v", err)
 	}
 
-	g.log(fmt.Sprintf("Firewall daemon started with PID: %d", g.firewallCmd.Process.Pid))
+	g.logInfo(fmt.Sprintf("Firewall daemon started with PID: %d", g.firewallCmd.Process.Pid))
 
 	go func() {
 		scanner := bufio.NewScanner(stdout)
@@ -687,47 +559,49 @@ func (g *OwVpnGui) startFirewallDaemon() error {
 			text := scanner.Text()
 			g.processFirewallOutput(text)
 		}
-		g.log("Firewall daemon stdout closed")
 	}()
 
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
 			text := scanner.Text()
-			g.log(fmt.Sprintf("Error: %s", text))
+			g.logError(fmt.Sprintf("Firewall Error: %s", text))
 		}
-		g.log("Firewall daemon stderr closed")
 	}()
 
 	// Verify the daemon is responsive
 	time.Sleep(1 * time.Second)
 	if err := g.sendCommand("status"); err != nil {
-		g.log("Initial communication with firewall daemon failed")
+		g.logError("Initial communication with firewall daemon failed")
 		if g.firewallCmd != nil && g.firewallCmd.Process != nil {
 			g.firewallCmd.Process.Kill()
 		}
 		return fmt.Errorf("daemon started but not responding: %v", err)
 	}
 
-	g.log("Successfully established communication with firewall daemon")
+	g.logInfo("Successfully established communication with firewall daemon")
 	return nil
 }
 
 func (g *OwVpnGui) processFirewallOutput(text string) {
-	if strings.Contains(text, "ERROR:") || strings.Contains(text, "Successfully") {
-		g.log(text)
+	if strings.Contains(text, "ERROR:") {
+		g.logError(text)
+	} else if strings.Contains(text, "Successfully") {
+		g.logImportant(text)
+	} else {
+		g.logInfo(text)
 	}
 
 	if strings.Contains(text, "Overwatch path not configured") {
 		g.pathConfigured = false
 		g.disableRegionButtons()
-		g.setStatus("Overwatch path not configured", theme.WarningIcon())
+		g.setStatus("Overwatch not detected, will detect when launched", theme.WarningIcon())
 	}
 
 	if strings.Contains(text, "Current Overwatch path:") {
 		g.pathConfigured = true
 		g.overwatchPath = strings.TrimPrefix(text, "Current Overwatch path: ")
-		g.log(fmt.Sprintf("Using Overwatch path: %s", g.overwatchPath))
+		g.logImportant(fmt.Sprintf("Using Overwatch path: %s", g.overwatchPath))
 		g.enableRegionButtons()
 		g.saveConfig()
 	}
@@ -735,7 +609,7 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 	if strings.Contains(text, "Overwatch path set to:") {
 		g.pathConfigured = true
 		g.overwatchPath = strings.TrimPrefix(text, "Overwatch path set to: ")
-		g.log(fmt.Sprintf("Overwatch path set to: %s", g.overwatchPath))
+		g.logImportant(fmt.Sprintf("Overwatch path set to: %s", g.overwatchPath))
 		g.enableRegionButtons()
 		g.saveConfig()
 	}
@@ -764,17 +638,17 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 
 func (g *OwVpnGui) toggleRegion(region string) {
 	if !g.pathConfigured {
-		g.log("Overwatch path not configured. Please detect Overwatch path first.")
-		g.promptForOverwatchPath()
+		g.logImportant("Overwatch path not configured. Overwatch will be detected automatically when launched.")
+		g.setStatus("Waiting for Overwatch to launch", theme.WarningIcon())
 		return
 	}
 
 	isBlocked := g.blocked[region]
 
 	if isBlocked {
-		g.log(fmt.Sprintf("Unblocking region %s...", region))
+		g.logImportant(fmt.Sprintf("Unblocking region %s...", region))
 		if err := g.sendCommand(fmt.Sprintf("unblock|%s", region)); err != nil {
-			g.log(fmt.Sprintf("Error unblocking region %s: %v", region, err))
+			g.logError(fmt.Sprintf("Error unblocking region %s: %v", region, err))
 			return
 		}
 		g.blocked[region] = false
@@ -794,7 +668,7 @@ func (g *OwVpnGui) toggleRegion(region string) {
 		g.processMutex.Unlock()
 
 		if isRunning {
-			g.log("Cannot block region while Overwatch is running. Please close Overwatch first.")
+			g.logImportant("Cannot block region while Overwatch is running. Please close Overwatch first.")
 			content := container.NewVBox(
 				widget.NewLabel("Overwatch is currently running."),
 				widget.NewLabel("Please close Overwatch before blocking regions."),
@@ -803,10 +677,10 @@ func (g *OwVpnGui) toggleRegion(region string) {
 			return
 		}
 
-		g.log(fmt.Sprintf("Blocking region %s...", region))
+		g.logImportant(fmt.Sprintf("Blocking region %s...", region))
 		ipDir := g.getIPDirectory()
 		if err := g.sendCommand(fmt.Sprintf("block|%s|%s", region, ipDir)); err != nil {
-			g.log(fmt.Sprintf("Error blocking region %s: %v", region, err))
+			g.logError(fmt.Sprintf("Error blocking region %s: %v", region, err))
 			return
 		}
 		g.blocked[region] = true
@@ -820,9 +694,9 @@ func (g *OwVpnGui) toggleRegion(region string) {
 }
 
 func (g *OwVpnGui) unblockAll() {
-	g.log("Unblocking all regions...")
+	g.logImportant("Unblocking all regions...")
 	if err := g.sendCommand("unblock-all"); err != nil {
-		g.log(fmt.Sprintf("Error unblocking all regions: %v", err))
+		g.logError(fmt.Sprintf("Error unblocking all regions: %v", err))
 		return
 	}
 
@@ -845,7 +719,7 @@ func (g *OwVpnGui) unblockAll() {
 
 func (g *OwVpnGui) checkStatus() {
 	if err := g.sendCommand("status"); err != nil {
-		g.log(fmt.Sprintf("Error checking status: %v", err))
+		g.logInfo(fmt.Sprintf("Status check: %v", err))
 	}
 }
 
@@ -865,34 +739,49 @@ func (g *OwVpnGui) setStatus(status string, icon fyne.Resource) {
 	g.window.Canvas().Refresh(g.statusIcon)
 }
 
-func (g *OwVpnGui) log(message string) {
+// Log levels
+func (g *OwVpnGui) logImportant(message string) {
+	// Always log important messages (actions, errors, state changes)
 	fmt.Println(message)
-
 	timestamp := time.Now().Format("15:04:05")
 	formattedMsg := fmt.Sprintf("[%s] %s\n%s", timestamp, message, g.logText.Text)
 	g.logText.SetText(formattedMsg)
 	g.window.Canvas().Refresh(g.logText)
 }
 
+func (g *OwVpnGui) logError(message string) {
+	// Always log errors
+	fmt.Println("ERROR: " + message)
+	timestamp := time.Now().Format("15:04:05")
+	formattedMsg := fmt.Sprintf("[%s] ERROR: %s\n%s", timestamp, message, g.logText.Text)
+	g.logText.SetText(formattedMsg)
+	g.window.Canvas().Refresh(g.logText)
+}
+
+func (g *OwVpnGui) logInfo(message string) {
+	// Only print to console, don't add to UI log
+	fmt.Println(message)
+}
+
 func (g *OwVpnGui) cleanup() {
-	g.log("Cleaning up...")
+	g.logImportant("Cleaning up...")
 	g.window.Hide()
 
 	if g.cmdStdin != nil {
-		g.log("Sending cleanup command to firewall daemon...")
+		g.logInfo("Sending cleanup command to firewall daemon...")
 
 		if err := g.sendCommand("unblock-all"); err != nil {
-			g.log(fmt.Sprintf("Warning: Error sending unblock-all command: %v", err))
+			g.logError(fmt.Sprintf("Warning: Error sending unblock-all command: %v", err))
 		} else {
-			g.log("Waiting for cleanup to complete...")
+			g.logInfo("Waiting for cleanup to complete...")
 			time.Sleep(1 * time.Second)
 		}
 
 		if err := g.sendCommand("exit"); err != nil {
-			g.log(fmt.Sprintf("Warning: Error sending exit command: %v", err))
+			g.logError(fmt.Sprintf("Warning: Error sending exit command: %v", err))
 		}
 
-		g.log("Closing connection to firewall daemon...")
+		g.logInfo("Closing connection to firewall daemon...")
 		_ = g.cmdStdin.Close()
 
 		// Wait for daemon to exit
@@ -908,9 +797,9 @@ func (g *OwVpnGui) cleanup() {
 
 		select {
 		case <-cleanup:
-			g.log("Firewall daemon exited normally")
+			g.logInfo("Firewall daemon exited normally")
 		case <-timeoutChan:
-			g.log("Timeout waiting for daemon to exit")
+			g.logInfo("Timeout waiting for daemon to exit")
 			// Force terminate if needed
 			if g.firewallCmd != nil && g.firewallCmd.Process != nil {
 				g.firewallCmd.Process.Kill()
@@ -918,7 +807,7 @@ func (g *OwVpnGui) cleanup() {
 		}
 	}
 
-	g.log("Cleanup completed, exiting...")
+	g.logImportant("Cleanup completed, exiting...")
 	os.Exit(0)
 }
 

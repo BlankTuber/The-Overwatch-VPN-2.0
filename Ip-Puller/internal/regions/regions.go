@@ -2,8 +2,6 @@ package regions
 
 import (
 	"strings"
-
-	"quidque.no/ow2-ip-puller/internal/api"
 )
 
 // Define regions
@@ -19,6 +17,12 @@ const (
 	OCE Region = "Oce"     // Oceania
 	UNK Region = "Unknown" // Unknown
 )
+
+// Prefix represents an IP prefix with country code
+type Prefix struct {
+	Prefix      string
+	CountryCode string
+}
 
 // Map country codes to regions
 var regionMap map[string]Region
@@ -91,18 +95,11 @@ func GetRegionByCountryCode(countryCode string) Region {
 	return region
 }
 
-// CategorizeIPsByRegion categorizes IPs by region
-func CategorizeIPsByRegion(response *api.Response) map[Region][]string {
+// CategorizeIPsByPrefix categorizes IPs by region
+func CategorizeIPsByPrefix(prefixes []Prefix) map[Region][]string {
 	ipsByRegion := make(map[Region][]string)
 
-	// Process IPv4 prefixes
-	for _, prefix := range response.Data.IPv4Prefixes {
-		region := GetRegionByCountryCode(prefix.CountryCode)
-		ipsByRegion[region] = append(ipsByRegion[region], prefix.Prefix)
-	}
-
-	// Process IPv6 prefixes
-	for _, prefix := range response.Data.IPv6Prefixes {
+	for _, prefix := range prefixes {
 		region := GetRegionByCountryCode(prefix.CountryCode)
 		ipsByRegion[region] = append(ipsByRegion[region], prefix.Prefix)
 	}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,12 @@ type Firewall struct {
 	configFile   string
 }
 
+const (
+	maxBatchSize     = 50
+	maxConcurrent    = 20
+	defaultBatchSize = 25
+)
+
 func New() *Firewall {
 	fw := &Firewall{
 		rulePrefix: config.FirewallRulePrefix,
@@ -29,7 +36,6 @@ func New() *Firewall {
 	}
 
 	fw.loadPathFromConfig()
-
 	return fw
 }
 
@@ -48,7 +54,7 @@ func (f *Firewall) loadPathFromConfig() bool {
 		f.exePathMutex.Lock()
 		f.exePath = cfg.OverwatchPath
 		f.exePathMutex.Unlock()
-		fmt.Printf("Loaded Overwatch path from config: %s\n", cfg.OverwatchPath)
+		fmt.Printf("Loaded Overwatch path: %s\n", cfg.OverwatchPath)
 		return true
 	}
 
@@ -101,7 +107,6 @@ func (f *Firewall) SetOverwatchPath(path string) error {
 	f.exePath = path
 
 	f.updateConfigFile(path)
-
 	return nil
 }
 
@@ -138,10 +143,20 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 	}
 
 	if len(ips) == 0 {
-		return fmt.Errorf("no ips found in file: %s", filePath)
+		return fmt.Errorf("no valid IPs found in file: %s", filePath)
 	}
 
-	fmt.Printf("Found %d IPs to block for region %s\n", len(ips), region)
+	// Validate IPs before blocking
+	validIPs := validateIPs(ips)
+	if len(validIPs) == 0 {
+		return fmt.Errorf("no valid IPs found after validation in: %s", filePath)
+	}
+
+	if len(validIPs) < len(ips) {
+		fmt.Printf("Warning: Removed %d invalid IPs from %s\n", len(ips)-len(validIPs), filePath)
+	}
+
+	fmt.Printf("Found %d valid IPs to block for region %s\n", len(validIPs), region)
 
 	f.exePathMutex.RLock()
 	exePath := f.exePath
@@ -155,25 +170,31 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 		fmt.Printf("Warning: Failed to clean up existing rules: %v\n", err)
 	}
 
-	batchSize := 25
-	totalBatches := (len(ips) + batchSize - 1) / batchSize
+	// Calculate optimal batch size based on number of IPs
+	batchSize := defaultBatchSize
+	if len(validIPs) > 1000 {
+		batchSize = maxBatchSize
+	} else if len(validIPs) < 100 {
+		batchSize = 10
+	}
 
-	fmt.Printf("Processing %d IPs in %d batches\n", len(ips), totalBatches)
+	totalBatches := (len(validIPs) + batchSize - 1) / batchSize
+
+	fmt.Printf("Processing %d IPs in %d batches\n", len(validIPs), totalBatches)
 
 	var wg sync.WaitGroup
 	errChan := make(chan error, totalBatches*2)
 	successCount := make(chan int, totalBatches*2)
 
-	maxConcurrent := 10
 	sem := make(chan struct{}, maxConcurrent)
 
-	for i := 0; i < len(ips); i += batchSize {
+	for i := 0; i < len(validIPs); i += batchSize {
 		end := i + batchSize
-		if end > len(ips) {
-			end = len(ips)
+		if end > len(validIPs) {
+			end = len(validIPs)
 		}
 
-		batch := ips[i:end]
+		batch := validIPs[i:end]
 		batchNum := i/batchSize + 1
 
 		wg.Add(1)
@@ -185,6 +206,7 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 			ruleName := fmt.Sprintf("%s%s-Batch%d", f.rulePrefix, region, batchNum)
 			ipList := strings.Join(batch, ",")
 
+			// Create outbound rule
 			output, err := f.executeFirewallCmd("add", "rule",
 				"name="+ruleName,
 				"dir=out",
@@ -198,6 +220,7 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 			}
 			successCount <- 1
 
+			// Create inbound rule
 			output, err = f.executeFirewallCmd("add", "rule",
 				"name="+ruleName+"-In",
 				"dir=in",
@@ -232,10 +255,54 @@ func (f *Firewall) BlockIPs(region string, ipListDir string) error {
 		return fmt.Errorf("failed to create %d rules: %v", len(errors), errors[0])
 	}
 
-	// Removed the verification step here
-
-	fmt.Printf("Attempted to block %d IPs for region %s (%d rules attempted)\n", len(ips), region, totalSuccessRules)
+	fmt.Printf("Successfully blocked %d IPs for region %s (%d rules created)\n", len(validIPs), region, totalSuccessRules/2)
 	return nil
+}
+
+func validateIPs(ips []string) []string {
+	validIPs := make([]string, 0, len(ips))
+
+	for _, ip := range ips {
+		// For CIDR notation (192.168.1.0/24)
+		if strings.Contains(ip, "/") {
+			parts := strings.Split(ip, "/")
+			if len(parts) != 2 {
+				continue
+			}
+
+			// Check if IP part is valid
+			if net.ParseIP(strings.TrimSpace(parts[0])) == nil {
+				continue
+			}
+
+			validIPs = append(validIPs, ip)
+			continue
+		}
+
+		// For range notation (192.168.1.1-192.168.1.10)
+		if strings.Contains(ip, "-") {
+			parts := strings.Split(ip, "-")
+			if len(parts) != 2 {
+				continue
+			}
+
+			// Check if both IPs are valid
+			if net.ParseIP(strings.TrimSpace(parts[0])) == nil ||
+				net.ParseIP(strings.TrimSpace(parts[1])) == nil {
+				continue
+			}
+
+			validIPs = append(validIPs, ip)
+			continue
+		}
+
+		// For single IP
+		if net.ParseIP(strings.TrimSpace(ip)) != nil {
+			validIPs = append(validIPs, ip)
+		}
+	}
+
+	return validIPs
 }
 
 func (f *Firewall) UnblockIPs(region string) error {
@@ -260,7 +327,6 @@ func (f *Firewall) UnblockAll() error {
 	errChan := make(chan error, len(rules))
 	successCount := make(chan int, len(rules))
 
-	maxConcurrent := 10
 	sem := make(chan struct{}, maxConcurrent)
 
 	for _, rule := range rules {
@@ -305,6 +371,7 @@ func (f *Firewall) UnblockAll() error {
 		fmt.Println("No firewall rules were removed")
 	}
 
+	// Verify all rules were removed
 	remainingRules, _ := f.listRules()
 	remaining := 0
 	for _, rule := range remainingRules {
@@ -323,7 +390,7 @@ func (f *Firewall) UnblockAll() error {
 func readIPsFromFile(filePath string) ([]string, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("opening file: %w", err)
 	}
 	defer file.Close()
 
@@ -337,7 +404,7 @@ func readIPsFromFile(filePath string) ([]string, error) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("reading file: %w", err)
 	}
 
 	return ips, nil
@@ -372,7 +439,6 @@ func (f *Firewall) removeRules(region string) error {
 	errChan := make(chan error, matchingRules)
 	successCount := make(chan int, matchingRules)
 
-	maxConcurrent := 10
 	sem := make(chan struct{}, maxConcurrent)
 
 	for _, rule := range rules {
@@ -454,7 +520,7 @@ func (f *Firewall) executeFirewallCmd(args ...string) (string, error) {
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(output), err
+		return string(output), fmt.Errorf("command execution failed: %w", err)
 	}
 
 	return string(output), nil
