@@ -173,6 +173,7 @@ func (g *OwVpnGui) showHowToUseWindow() {
 		container.NewTabItem("Important Notes", container.NewVBox(
 			widget.NewLabelWithStyle("Important Information", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 			widget.NewLabel(""),
+			widget.NewLabel("• This software only works with Battle.net, as you need to choose the login region"),
 			widget.NewLabel("• You cannot block regions while Overwatch is running"),
 			widget.NewLabel("• If you can't connect to a game, try unblocking regions"),
 			widget.NewLabel("• All blocks are automatically removed when you close the app"),
@@ -496,7 +497,7 @@ func (g *OwVpnGui) updateRegionButtons() {
 	logLabel.Alignment = fyne.TextAlignCenter
 
 	scrollLog := container.NewScroll(g.logText)
-	scrollLog.SetMinSize(fyne.NewSize(780, 150))
+	scrollLog.SetMinSize(fyne.NewSize(780, 300))
 
 	content := container.NewVBox(
 		container.NewPadded(titleLabel),
