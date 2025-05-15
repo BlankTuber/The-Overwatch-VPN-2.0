@@ -148,6 +148,19 @@ func (g *OwVpnGui) showPendingDetectionDialog() {
 
 func (g *OwVpnGui) showHowToUseWindow() {
 	tabs := container.NewAppTabs(
+		container.NewTabItem("Reset Config", container.NewVBox(
+			widget.NewLabelWithStyle("Reset Configuration", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			widget.NewLabel(""),
+			widget.NewLabel("• Use the 'RESET CONFIG' button if you need to clear the saved configuration"),
+			widget.NewLabel("• This is helpful when the wrong version of Overwatch was detected"),
+			widget.NewLabel("• After resetting, launch Overwatch to trigger automatic detection"),
+			widget.NewLabel("• All region blocks will be cleared when resetting"),
+			widget.NewLabel(""),
+			widget.NewLabel("Common reasons to reset:"),
+			widget.NewLabel("- Wrong Overwatch version or location detected"),
+			widget.NewLabel("- Moving Overwatch to a different location"),
+			widget.NewLabel("- Troubleshooting connection issues"),
+		)),
 		container.NewTabItem("Blocking Regions", container.NewVBox(
 			widget.NewLabelWithStyle("How to Block Regions", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 			widget.NewLabel(""),
@@ -484,10 +497,17 @@ func (g *OwVpnGui) updateRegionButtons() {
 	howToUseBtn.Importance = widget.MediumImportance
 	howToUseBtnContainer := container.NewPadded(howToUseBtn)
 
+	resetConfigBtn := widget.NewButtonWithIcon("RESET CONFIG", theme.SettingsIcon(), func() {
+		g.resetConfig()
+	})
+	resetConfigBtn.Importance = widget.MediumImportance
+	resetConfigBtnContainer := container.NewPadded(resetConfigBtn)
+
 	buttonControls := container.NewHBox(
 		layout.NewSpacer(),
 		unblockAllBtnContainer,
 		howToUseBtnContainer,
+		resetConfigBtnContainer,
 		layout.NewSpacer(),
 	)
 
@@ -745,7 +765,7 @@ func (g *OwVpnGui) processFirewallOutput(text string) {
 		g.setStatus("Error", theme.ErrorIcon())
 
 		if strings.Contains(text, "failed to create") || strings.Contains(text, "failed to verify") {
-			dialog.ShowError(fmt.Errorf("Firewall operation failed: %s", text), g.window)
+			dialog.ShowError(fmt.Errorf("firewall operation failed: %s", text), g.window)
 		}
 	}
 }
@@ -917,6 +937,46 @@ func (g *OwVpnGui) cleanup() {
 
 	g.logImportant("Cleanup completed, exiting...")
 	os.Exit(0)
+}
+
+func (g *OwVpnGui) resetConfig() {
+	content := container.NewVBox(
+		widget.NewLabelWithStyle("Reset Configuration", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewLabel(""),
+		widget.NewLabel("This will:"),
+		widget.NewLabel("• Delete the saved configuration file"),
+		widget.NewLabel("• Clear the detected Overwatch path"),
+		widget.NewLabel("• Force re-detection of Overwatch when launched"),
+		widget.NewLabel(""),
+		widget.NewLabel("Use this if:"),
+		widget.NewLabel("• The wrong version of Overwatch was detected"),
+		widget.NewLabel("• You moved Overwatch to a different location"),
+		widget.NewLabel("• You're experiencing issues with game detection"),
+	)
+
+	dialog.NewCustomConfirm(
+		"Reset Configuration",
+		"Reset",
+		"Cancel",
+		content,
+		func(reset bool) {
+			if reset {
+				g.logImportant("Resetting configuration...")
+				if err := os.Remove(g.configPath); err != nil && !os.IsNotExist(err) {
+					g.logError(fmt.Sprintf("Error deleting config file: %v", err))
+					return
+				}
+				g.pathConfigured = false
+				g.overwatchPath = ""
+				g.initialSetupDone = false
+				g.logImportant("Configuration reset successful")
+				g.setStatus("Waiting for Overwatch to launch", theme.WarningIcon())
+				g.disableRegionButtons()
+				g.showPendingDetectionDialog()
+			}
+		},
+		g.window,
+	).Show()
 }
 
 func fileExists(filename string) bool {
